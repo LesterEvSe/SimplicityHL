@@ -2,16 +2,17 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::error::ErrorCollector;
-use crate::parse::{self, Item, ParseFromStrWithErrors, Program, UseDecl};
+use crate::error::{ErrorCollector, Span};
+use crate::parse::{self, ParseFromStrWithErrors, UseDecl, Visibility};
+use crate::str::Identifier;
 use crate::LibConfig;
 
 /// Graph Node: One file = One module
 #[derive(Debug, Clone)]
-pub struct Module {
+struct Module {
     /// Parsed AST (your `parse::Program`)
     /// Using Option to first create the node, then add the AST
-    pub parsed_program: Program,
+    pub parsed_program: parse::Program,
 }
 
 /// The Dependency Graph itself
@@ -22,9 +23,22 @@ pub struct ProjectGraph {
     /// Fast lookup: Path -> ID
     /// Solves the duplicate problem (so as not to parse a.simf twice)
     pub lookup: HashMap<PathBuf, usize>,
+    pub paths: Vec<PathBuf>,
 
     /// Adjacency list: Who depends on whom
     pub dependencies: HashMap<usize, Vec<usize>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Resolution {
+    pub visibility: Visibility,
+}
+
+pub struct Program {
+    //pub graph: ProjectGraph,
+    pub items: Arc<[parse::Item]>,
+    pub scope_items: Vec<HashMap<Identifier, Resolution>>,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -66,11 +80,12 @@ fn parse_and_get_program(prog_file: &Path) -> Result<parse::Program, String> {
 }
 
 impl ProjectGraph {
-    pub fn new(lib_cfg: &LibConfig, root_program: &Program) -> Result<Self, String> {
+    pub fn new(lib_cfg: &LibConfig, root_program: &parse::Program) -> Result<Self, String> {
         let mut modules: Vec<Module> = vec![Module {
             parsed_program: root_program.clone(),
         }];
         let mut lookup: HashMap<PathBuf, usize> = HashMap::new();
+        let mut paths: Vec<PathBuf> = vec![lib_cfg.root_path.clone()];
         let mut dependencies: HashMap<usize, Vec<usize>> = HashMap::new();
 
         let root_id = 0;
@@ -86,7 +101,7 @@ impl ProjectGraph {
             let current_program = &modules[curr_id].parsed_program;
 
             for elem in current_program.items() {
-                if let Item::Use(use_decl) = elem {
+                if let parse::Item::Use(use_decl) = elem {
                     if let Ok(path) = get_full_path(&lib_cfg.libraries, use_decl) {
                         pending_imports.push(path);
                     }
@@ -112,6 +127,7 @@ impl ProjectGraph {
                     parsed_program: program,
                 });
                 lookup.insert(path.clone(), last_ind);
+                paths.push(path.clone());
                 dependencies.entry(curr_id).or_default().push(last_ind);
 
                 queue.push_back(last_ind);
@@ -121,6 +137,7 @@ impl ProjectGraph {
         Ok(Self {
             modules,
             lookup,
+            paths,
             dependencies,
         })
     }
@@ -148,9 +165,7 @@ impl ProjectGraph {
 
         if visiting.contains(&module) {
             let cycle_start = visiting.iter().position(|m| *m == module).unwrap();
-            return Err(C3Error::CycleDetected(
-                visiting[cycle_start..].to_vec(),
-            ));
+            return Err(C3Error::CycleDetected(visiting[cycle_start..].to_vec()));
         }
 
         visiting.push(module);
@@ -167,8 +182,7 @@ impl ProjectGraph {
         seqs.push(parents.clone());
 
         let mut result = vec![module];
-        let merged = merge(seqs)
-            .ok_or(C3Error::InconsistentLinearization { module })?;
+        let merged = merge(seqs).ok_or(C3Error::InconsistentLinearization { module })?;
 
         result.extend(merged);
 
@@ -176,6 +190,113 @@ impl ProjectGraph {
         memo.insert(module, result.clone());
 
         Ok(result)
+    }
+
+    // TODO: @Sdoba16 to implement
+    fn build_ordering(&self) {}
+
+    fn process_use_item(
+        scope_items: &mut [HashMap<Identifier, Resolution>],
+        file_id: usize,
+        ind: usize,
+        elem: &Identifier,
+        use_decl_visibility: Visibility,
+    ) -> Result<(), String> {
+        if matches!(
+            scope_items[ind][elem].visibility,
+            parse::Visibility::Private
+        ) {
+            return Err(format!(
+                "Function {} is private and cannot be used.",
+                elem.as_inner()
+            ));
+        }
+
+        scope_items[file_id].insert(
+            elem.clone(),
+            Resolution {
+                visibility: use_decl_visibility,
+            },
+        );
+
+        Ok(())
+    }
+
+    // TODO: Change. Consider processing more than one errro at a time
+    fn build_program(&self, order: &Vec<usize>) -> Result<Program, String> {
+        let mut items: Vec<parse::Item> = Vec::new();
+        let mut scope_items: Vec<HashMap<Identifier, Resolution>> = Vec::new();
+
+        for file_id in order {
+            scope_items.push(HashMap::new());
+
+            for elem in self.modules[*file_id].parsed_program.items() {
+                match elem {
+                    // If the function is private, we don't add it to the current scope.
+                    // If the function is public, we add it as public if we have 'pub use', or as private if we only have 'use'.
+                    // We can do this because all Items in the Arc<[Item]> array will be defined in advance.
+                    parse::Item::Use(use_decl) => {
+                        let ind = self.lookup[&use_decl.path_buf()];
+
+                        match use_decl.items() {
+                            parse::UseItems::Single(elem) => {
+                                ProjectGraph::process_use_item(
+                                    &mut scope_items,
+                                    *file_id,
+                                    ind,
+                                    elem,
+                                    use_decl.visibility().clone(),
+                                )?;
+                            }
+                            parse::UseItems::List(elems) => {
+                                for elem in elems {
+                                    ProjectGraph::process_use_item(
+                                        &mut scope_items,
+                                        *file_id,
+                                        ind,
+                                        elem,
+                                        use_decl.visibility().clone(),
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    parse::Item::TypeAlias(alias) => {
+                        items.push(elem.clone());
+                        scope_items[*file_id].insert(
+                            Identifier::from(alias.name().clone()),
+                            Resolution {
+                                visibility: alias.visibility().clone(),
+                            },
+                        );
+                    }
+                    parse::Item::Function(function) => {
+                        items.push(elem.clone());
+                        scope_items[*file_id].insert(
+                            Identifier::from(function.name().clone()),
+                            Resolution {
+                                visibility: function.visibility().clone(),
+                            },
+                        );
+                    }
+                    parse::Item::Module => {}
+                }
+            }
+        }
+
+        Ok(Program {
+            items: items.into(),
+            scope_items,
+            span: self.modules[0].parsed_program.as_ref().clone(),
+        })
+    }
+
+    pub fn resolve_complication_order(&self) -> Result<Program, String> {
+        // TODO: Resolve errors more appropriately
+        let mut order = self.c3_linearize().unwrap();
+        order.reverse();
+        // self.build_ordering();
+        self.build_program(&order)
     }
 }
 
@@ -219,8 +340,7 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    // --- Helper to setup environment ---
-
+    // ProjectGraph::new tests
     // Creates a file with specific content in the temp directory
     fn create_simf_file(dir: &Path, rel_path: &str, content: &str) -> PathBuf {
         let full_path = dir.join(rel_path);
@@ -238,7 +358,7 @@ mod tests {
 
     // Helper to mock the initial root program parsing
     // (Assuming your parser works via a helper function)
-    fn parse_root(path: &Path) -> Program {
+    fn parse_root(path: &Path) -> parse::Program {
         parse_and_get_program(path).expect("Root parsing failed")
     }
 
@@ -273,10 +393,8 @@ mod tests {
 
     #[test]
     fn test_c3_simple_import() {
-
         let temp_dir = TempDir::new().unwrap();
-        let root_path =
-            create_simf_file(temp_dir.path(), "root.simf", "use std::math::some_func;");
+        let root_path = create_simf_file(temp_dir.path(), "root.simf", "use std::math::some_func;");
         create_simf_file(temp_dir.path(), "libs/std/math.simf", "");
 
         let mut lib_map = HashMap::new();
@@ -377,11 +495,8 @@ mod tests {
 
         let order = graph.c3_linearize().expect("C3 failed");
 
-        assert_eq!(
-            order, vec![0, 1, 2, 3],
-        );
+        assert_eq!(order, vec![0, 1, 2, 3],);
     }
-
 
     #[test]
     fn test_cyclic_dependency() {
@@ -409,8 +524,6 @@ mod tests {
         let config = LibConfig::new(lib_map, &a_path);
         let graph = ProjectGraph::new(&config, &root_program).expect("Graph build failed");
 
-        println!("Graph dependencies: {:?}", graph.dependencies);
-        println!("lookup: {:?}", graph.lookup);
         assert_eq!(graph.modules.len(), 2, "Should only have A and B");
 
         // A depends on B
@@ -448,7 +561,6 @@ mod tests {
         let order = graph.c3_linearize().unwrap_err();
         matches!(order, C3Error::CycleDetected(_));
     }
-
 
     #[test]
     fn test_missing_file_error() {
@@ -497,5 +609,4 @@ mod tests {
             "Root should have no resolved dependencies"
         );
     }
-
 }

@@ -9,7 +9,7 @@ use crate::LibConfig;
 
 /// Graph Node: One file = One module
 #[derive(Debug, Clone)]
-struct Module {
+pub struct Module {
     /// Parsed AST (your `parse::Program`)
     /// Using Option to first create the node, then add the AST
     pub parsed_program: parse::Program,
@@ -67,7 +67,7 @@ fn get_full_path(
     ))
 }
 
-fn parse_and_get_program(prog_file: &Path) -> Result<parse::Program, String> {
+pub(crate) fn parse_and_get_program(prog_file: &Path) -> Result<parse::Program, String> {
     let prog_text = std::fs::read_to_string(prog_file).map_err(|e| e.to_string())?;
     let file = prog_text.into();
     let mut error_handler = crate::error::ErrorCollector::new(Arc::clone(&file));
@@ -193,7 +193,24 @@ impl ProjectGraph {
     }
 
     // TODO: @Sdoba16 to implement
-    fn build_ordering(&self) {}
+    fn build_ordering(&self) -> Result<Vec<usize>, String> {
+        let mut order = self
+            .c3_linearize()
+            .map_err(|e| format!("C3 error: {:?}", e))?;
+
+        // dependencies first
+        order.reverse();
+
+        // sanity check
+        let mut seen = std::collections::HashSet::new();
+        for id in &order {
+            if !seen.insert(*id) {
+                return Err(format!("Duplicate module in order: {}", id));
+            }
+        }
+
+        Ok(order)
+    }
 
     fn process_use_item(
         scope_items: &mut [HashMap<Identifier, Resolution>],
@@ -293,9 +310,7 @@ impl ProjectGraph {
 
     pub fn resolve_complication_order(&self) -> Result<Program, String> {
         // TODO: Resolve errors more appropriately
-        let mut order = self.c3_linearize().unwrap();
-        order.reverse();
-        // self.build_ordering();
+        let order = self.build_ordering().unwrap();
         self.build_program(&order)
     }
 }
@@ -404,9 +419,9 @@ mod tests {
         let config = LibConfig::new(lib_map, &root_path);
         let graph = ProjectGraph::new(&config, &root_program).expect("Graph build failed");
 
-        let order = graph.c3_linearize().expect("C3 failed");
+        let order = graph.build_ordering().expect("C3 failed");
 
-        assert_eq!(order, vec![0, 1]);
+        assert_eq!(order, vec![1, 0]);
     }
 
     #[test]
@@ -493,9 +508,9 @@ mod tests {
         let config = LibConfig::new(lib_map, &root_path);
         let graph = ProjectGraph::new(&config, &root_program).expect("Graph build failed");
 
-        let order = graph.c3_linearize().expect("C3 failed");
+        let order = graph.build_ordering().expect("C3 failed");
 
-        assert_eq!(order, vec![0, 1, 2, 3],);
+        assert_eq!(order, vec![3, 2, 1, 0],);
     }
 
     #[test]
@@ -558,8 +573,8 @@ mod tests {
         let config = LibConfig::new(lib_map, &a_path);
         let graph = ProjectGraph::new(&config, &root_program).expect("Graph build failed");
 
-        let order = graph.c3_linearize().unwrap_err();
-        matches!(order, C3Error::CycleDetected(_));
+        let order = graph.build_ordering().unwrap_err();
+        assert_eq!(order, "C3 error: CycleDetected([0, 1])");
     }
 
     #[test]

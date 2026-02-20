@@ -11,6 +11,7 @@ pub mod jet;
 pub mod lexer;
 pub mod named;
 pub mod num;
+pub mod order_check;
 pub mod parse;
 pub mod pattern;
 #[cfg(feature = "serde")]

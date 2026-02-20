@@ -134,6 +134,30 @@ impl AsRef<str> for Identifier {
     }
 }
 
+impl From<&str> for Identifier {
+    fn from(s: &str) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
+impl From<String> for Identifier {
+    fn from(s: String) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
+impl From<&str> for FunctionName {
+    fn from(s: &str) -> Self {
+        Self(std::sync::Arc::from(s))
+    }
+}
+
+impl From<String> for FunctionName {
+    fn from(s: String) -> Self {
+        Self(std::sync::Arc::from(s))
+    }
+}
+
 wrapped_string!(Identifier, "variable identifier");
 impl_arbitrary_lowercase_alpha!(Identifier);
 

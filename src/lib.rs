@@ -606,6 +606,14 @@ pub(crate) mod tests {
 
     // Real test cases
     #[test]
+    fn some_sort_of_test() {
+        let (test, _dir) = TestCase::temp_env("fn main() { help(); }\nfn help() {}", Vec::new());
+
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
     fn module_simple() {
         let (test, _dir) = TestCase::temp_env(
             "use temp::math::add; fn main() {}",
@@ -616,7 +624,136 @@ pub(crate) mod tests {
             .assert_run_success();
     }
 
-    // Demonstration of functionality for the user
+    #[test]
+    fn diamond_dependency_resolution() {
+        let main_code = r#"
+            use temp::left::get_left;
+            use temp::right::get_right;
+
+            fn main() {
+                let a: BaseType = get_left();
+                let b: BaseType = get_right();
+                let (_, c): (bool, BaseType) = jet::add_32(a, b);
+                assert!(jet::eq_32(c, 3));
+            }
+        "#;
+
+        let libs = vec![
+            ("temp", "temp/base.simf", "pub type BaseType = u32;"),
+            (
+                "temp",
+                "temp/left.simf",
+                "pub use temp::base::BaseType; pub fn get_left() -> BaseType { 1 }",
+            ),
+            (
+                "temp",
+                "temp/right.simf",
+                "pub use temp::base::BaseType; pub fn get_right() -> BaseType { 2 }",
+            ),
+        ];
+
+        let (test, _dir) = TestCase::temp_env(main_code, libs);
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
+    #[should_panic]
+    fn cyclic_dependency_error() {
+        let main_code = "use temp::module_a::TypeA; fn main() {}";
+
+        let libs = vec![
+            (
+                "temp",
+                "temp/module_a.simf",
+                "pub use temp::module_b::TypeB; pub type TypeA = u32;",
+            ),
+            (
+                "temp",
+                "temp/module_b.simf",
+                "pub use temp::module_a::TypeA; pub type TypeB = u32;",
+            ),
+        ];
+
+        let (test, _dir) = TestCase::temp_env(main_code, libs);
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
+    fn deep_reexport_chain() {
+        let main_code = r#"
+            use temp::level1::CoreSmth;
+            use temp::level1::core_val;
+
+            fn main() {
+                let val: CoreSmth = core_val();
+                assert!(jet::eq_32(val, 42));
+            }
+        "#;
+
+        let libs = vec![
+            (
+                "temp",
+                "temp/level3.simf",
+                "pub type CoreSmth = u32; pub fn core_val() -> CoreSmth { 42 }",
+            ),
+            (
+                "temp",
+                "temp/level2.simf",
+                "pub use temp::level3::CoreSmth; pub use temp::level3::core_val;",
+            ),
+            (
+                "temp",
+                "temp/level1.simf",
+                "pub use temp::level2::CoreSmth; pub use temp::level2::core_val;",
+            ),
+        ];
+
+        let (test, _dir) = TestCase::temp_env(main_code, libs);
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
+    #[should_panic]
+    fn private_type_visibility_error() {
+        let main_code = r#"
+            use temp::hidden::SecretType;
+            fn main() {}
+        "#;
+
+        let libs = vec![(
+            "temp",
+            "temp/hidden.simf",
+            "type SecretType = u32; pub fn ok() {}",
+        )];
+
+        let (test, _dir) = TestCase::temp_env(main_code, libs);
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
+    #[should_panic] // TODO: Or not? Fix it later, after receiving a response from the devs.
+    fn name_collision_error() {
+        let main_code = r#"
+            use temp::mod_a::Value;
+            use temp::mod_b::Value;
+
+            fn main() {}
+        "#;
+
+        let libs = vec![
+            ("temp", "temp/mod_a.simf", "pub type Value = u32;"),
+            ("temp", "temp/mod_b.simf", "pub type Value = u32;"),
+        ];
+
+        let (test, _dir) = TestCase::temp_env(main_code, libs);
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
     #[test]
     fn single_lib() {
         TestCase::program_file_with_libs(

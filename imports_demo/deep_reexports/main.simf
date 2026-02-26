@@ -1,0 +1,7 @@
+use temp::level1::CoreSmth;
+use temp::level1::core_val;
+
+fn main() {
+    let val: CoreSmth = core_val();
+    assert!(jet::eq_32(42, val));
+}

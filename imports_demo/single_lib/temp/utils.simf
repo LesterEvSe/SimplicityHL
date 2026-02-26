@@ -1,0 +1,5 @@
+pub use temp::funcs::Smth;
+
+pub fn get_two() -> Smth {
+    2
+}

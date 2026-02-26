@@ -157,17 +157,23 @@ impl TemplateProgram {
         let mut error_handler = ErrorCollector::new();
 
         // 1. Parse root file
-        let parsed_program = parse::Program::parse_from_str_with_errors(&file, source.clone(), &mut error_handler)
-            .ok_or_else(|| error_handler.to_string())?;
+        let parsed_program =
+            parse::Program::parse_from_str_with_errors(&file, source.clone(), &mut error_handler)
+                .ok_or_else(|| error_handler.to_string())?;
 
         // 2. Create the driver program
         let driver_program: driver::Program = if libraries.is_empty() {
             driver::Program::from_parse(&parsed_program, source.clone(), &mut error_handler)
                 .ok_or_else(|| error_handler.to_string())?
         } else {
-            ProjectGraph::new(source.clone(), libraries, &parsed_program, &mut error_handler)
-                .and_then(|graph| graph.resolve_complication_order(&mut error_handler))
-                .ok_or_else(|| error_handler.to_string())?
+            ProjectGraph::new(
+                source.clone(),
+                libraries,
+                &parsed_program,
+                &mut error_handler,
+            )
+            .and_then(|graph| graph.resolve_complication_order(&mut error_handler))
+            .ok_or_else(|| error_handler.to_string())?
         };
 
         // 3. AST Analysis
@@ -776,13 +782,40 @@ pub(crate) mod tests {
             .assert_run_success();
     }
 
+    // Tests to demonstrate functionality
     #[test]
     fn single_lib() {
         TestCase::program_file_with_libs(
-            "./examples/single_lib/main.simf",
-            [("temp", "./examples/single_lib/temp")],
+            "./imports_demo/single_lib/main.simf",
+            [("temp", "./imports_demo/single_lib/temp")],
         )
         .with_witness_values(WitnessValues::default())
+        .print_encoding()
+        .assert_run_success();
+    }
+
+    #[test]
+    fn simple_multilib() {
+        TestCase::program_file_with_libs(
+            "./imports_demo/simple_multilib/main.simf",
+            [
+                ("math", "./imports_demo/simple_multilib/math"),
+                ("crypto", "./imports_demo/simple_multilib/crypto"),
+            ],
+        )
+        .with_witness_values(WitnessValues::default())
+        .print_encoding()
+        .assert_run_success();
+    }
+
+    #[test]
+    fn deep_reexports() {
+        TestCase::program_file_with_libs(
+            "./imports_demo/deep_reexports/main.simf",
+            [("temp", "./imports_demo/deep_reexports/temp")],
+        )
+        .with_witness_values(WitnessValues::default())
+        .print_encoding()
         .assert_run_success();
     }
 

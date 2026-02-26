@@ -52,7 +52,11 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn from_parse(parsed: &parse::Program, source: SourceFile, handler: &mut ErrorCollector) -> Option<Self> {
+    pub fn from_parse(
+        parsed: &parse::Program,
+        source: SourceFile,
+        handler: &mut ErrorCollector,
+    ) -> Option<Self> {
         let root_path = source.name().without_extension();
 
         let mut items: Vec<Item> = Vec::new();
@@ -471,14 +475,14 @@ impl ProjectGraph {
         } else {
             return Some(RichError::new(
                 Error::UnresolvedItem(elem.as_inner().to_string()),
-                *use_decl.span()
+                *use_decl.span(),
             ));
         };
-        
+
         if matches!(resolution.visibility, parse::Visibility::Private) {
             return Some(RichError::new(
                 Error::PrivateItem(elem.as_inner().to_string()),
-                *use_decl.span()
+                *use_decl.span(),
             ));
         }
 
@@ -512,7 +516,7 @@ impl ProjectGraph {
                 visibility: vis.clone(),
             },
         );
-        
+
         None
     }
 
@@ -810,7 +814,10 @@ pub(crate) mod tests {
 
         // 5. Check results
         if handler.has_errors() {
-            panic!("Test Setup Failed: Root file syntax error: {}", ErrorCollector::to_string(&handler));
+            panic!(
+                "Test Setup Failed: Root file syntax error: {}",
+                ErrorCollector::to_string(&handler)
+            );
         }
 
         (program.expect("Root parsing failed internally"), source)
@@ -872,7 +879,7 @@ pub(crate) mod tests {
         let root_id = *ids.get("main").unwrap();
         let order = vec![root_id]; // Only one file
 
-        let mut error_handler= ErrorCollector::new();
+        let mut error_handler = ErrorCollector::new();
         let program = graph
             .build_program(&order, &mut error_handler)
             .expect("Failed to build program");
@@ -964,8 +971,8 @@ pub(crate) mod tests {
 
         // Order: A -> B -> Root
         let order = vec![id_a, id_b, id_root];
-        
-        let mut error_handler= ErrorCollector::new();
+
+        let mut error_handler = ErrorCollector::new();
         let result = graph.build_program(&order, &mut error_handler);
 
         assert!(

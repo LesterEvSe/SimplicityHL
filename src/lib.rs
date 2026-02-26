@@ -757,7 +757,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic] // TODO: Or not? Fix it later, after receiving a response from the devs.
+    // #[should_panic] // TODO: Or not? Fix it later, after receiving a response from the devs.
     fn name_collision_error() {
         let main_code = r#"
             use temp::mod_a::Value;

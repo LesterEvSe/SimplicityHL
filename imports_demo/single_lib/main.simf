@@ -1,5 +1,5 @@
-pub use temp::utils::get_two;
-use temp::funcs::{get_five, Smth};
+pub use jet::eq_32::get_two;
+use jet::funcs::{get_five, Smth};
 
 fn seven() -> u32 {
     7

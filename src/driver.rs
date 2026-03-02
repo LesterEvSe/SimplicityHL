@@ -52,7 +52,11 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn from_parse(parsed: &parse::Program, source: SourceFile, handler: &mut ErrorCollector) -> Option<Self> {
+    pub fn from_parse(
+        parsed: &parse::Program,
+        source: SourceFile,
+        handler: &mut ErrorCollector,
+    ) -> Option<Self> {
         let root_path = source.name().without_extension();
 
         let mut items: Vec<Item> = Vec::new();
@@ -145,7 +149,7 @@ impl Item {
     pub fn from_parse(parsed: &parse::Item, file_id: usize) -> Result<Self, RichError> {
         match parsed {
             parse::Item::TypeAlias(alias) => {
-                let driver_alias = TypeAlias::from_parse(alias, file_id);
+                let driver_alias = TypeAlias::from_parse(alias);
                 Ok(Item::TypeAlias(driver_alias))
             }
             parse::Item::Function(func) => {
@@ -229,7 +233,6 @@ impl_eq_hash!(Function; file_id, name, params, ret, body);
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct TypeAlias {
-    file_id: usize, // NOTE: Maybe don't need
     name: AliasName,
     ty: AliasedType,
     span: Span,
@@ -240,18 +243,12 @@ impl TypeAlias {
     ///
     /// We explicitly pass `file_id` here because the `parse::Function`
     /// doesn't know which file it came from.
-    pub fn from_parse(parsed: &parse::TypeAlias, file_id: usize) -> Self {
+    pub fn from_parse(parsed: &parse::TypeAlias) -> Self {
         Self {
-            file_id,
             name: parsed.name().clone(),
             ty: parsed.ty().clone(),
             span: *parsed.as_ref(),
         }
-    }
-
-    /// Access the visibility of the alias.
-    pub fn file_id(&self) -> usize {
-        self.file_id
     }
 
     /// Access the name of the alias.
@@ -273,12 +270,25 @@ impl TypeAlias {
     }
 }
 
-impl_eq_hash!(TypeAlias; file_id, name, ty);
+impl_eq_hash!(TypeAlias; name, ty);
 
 #[derive(Debug)]
 pub enum C3Error {
-    CycleDetected(Vec<usize>),
-    InconsistentLinearization { module: usize },
+    CycleDetected(Vec<String>),
+    InconsistentLinearization { module: String },
+}
+
+impl fmt::Display for C3Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            C3Error::CycleDetected(cycle) => {
+                write!(f, "Circular dependency detected: {:?}", cycle.join(" -> "))
+            }
+            C3Error::InconsistentLinearization { module } => {
+                write!(f, "Inconsistent resolution order for module '{:?}'", module)
+            }
+        }
+    }
 }
 
 impl ProjectGraph {
@@ -289,29 +299,22 @@ impl ProjectGraph {
         handler: &mut ErrorCollector,
     ) -> Option<Module> {
         let dep_key = SourceName::Real(Arc::from(full_path.with_extension("")));
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(_) => {
-                let err = RichError::new(Error::FileNotFound(PathBuf::from(full_path)), span)
-                    .with_source(importer_source.clone());
+        let Ok(content) = std::fs::read_to_string(full_path) else {
+            let err = RichError::new(Error::FileNotFound(PathBuf::from(full_path)), span)
+                .with_source(importer_source.clone());
 
-                handler.push(err);
-                return None;
-            }
+            handler.push(err);
+            return None;
         };
 
         let dep_source_file = SourceFile::new(dep_key.clone(), Arc::from(content.clone()));
 
-        if let Some(parsed_program) =
-            parse::Program::parse_from_str_with_errors(&content, dep_source_file.clone(), handler)
-        {
-            Some(Module {
+        parse::Program::parse_from_str_with_errors(&content, dep_source_file.clone(), handler).map(
+            |parsed_program| Module {
                 source: dep_source_file,
                 parsed_program,
-            })
-        } else {
-            None
-        }
+            },
+        )
     }
 
     pub fn new(
@@ -374,14 +377,12 @@ impl ProjectGraph {
                     continue;
                 }
 
-                let module = if let Some(module) = ProjectGraph::parse_and_get_program(
+                let Some(module) = ProjectGraph::parse_and_get_program(
                     &full_path,
                     importer_source.clone(),
-                    import_span.clone(),
+                    import_span,
                     handler,
-                ) {
-                    module
-                } else {
+                ) else {
                     continue;
                 };
 
@@ -432,7 +433,11 @@ impl ProjectGraph {
 
         if visiting.contains(&module) {
             let cycle_start = visiting.iter().position(|m| *m == module).unwrap();
-            return Err(C3Error::CycleDetected(visiting[cycle_start..].to_vec()));
+            let cycle_names: Vec<String> = visiting[cycle_start..]
+                .iter()
+                .map(|&id| self.modules[id].source.name().to_string())
+                .collect();
+            return Err(C3Error::CycleDetected(cycle_names));
         }
 
         visiting.push(module);
@@ -442,14 +447,16 @@ impl ProjectGraph {
         let mut seqs: Vec<Vec<usize>> = Vec::new();
 
         for parent in &parents {
-            let lin = self.linearize_rec(*parent, memo, visiting)?;
-            seqs.push(lin);
+            let line = self.linearize_rec(*parent, memo, visiting)?;
+            seqs.push(line);
         }
 
         seqs.push(parents.clone());
 
         let mut result = vec![module];
-        let merged = merge(seqs).ok_or(C3Error::InconsistentLinearization { module })?;
+        let merged = merge(seqs).ok_or(C3Error::InconsistentLinearization {
+            module: self.modules[module].source.name().to_string(),
+        })?;
 
         result.extend(merged);
 
@@ -466,19 +473,17 @@ impl ProjectGraph {
         elem: &Identifier,
         use_decl: &parse::UseDecl,
     ) -> Option<RichError> {
-        let resolution = if let Some(res) = resolutions[ind].get(elem) {
-            res
-        } else {
+        let Some(resolution) = resolutions[ind].get(elem) else {
             return Some(RichError::new(
                 Error::UnresolvedItem(elem.as_inner().to_string()),
-                *use_decl.span()
+                *use_decl.span(),
             ));
         };
-        
+
         if matches!(resolution.visibility, parse::Visibility::Private) {
             return Some(RichError::new(
                 Error::PrivateItem(elem.as_inner().to_string()),
-                *use_decl.span()
+                *use_decl.span(),
             ));
         }
 
@@ -512,7 +517,7 @@ impl ProjectGraph {
                 visibility: vis.clone(),
             },
         );
-        
+
         None
     }
 
@@ -597,11 +602,17 @@ impl ProjectGraph {
         }
     }
 
-    pub fn resolve_complication_order(&self, handler: &mut ErrorCollector) -> Option<Program> {
-        // TODO: @LesterEvSe, Resolve errors more appropriately
-        let mut order = self.c3_linearize().unwrap();
+    pub fn resolve_complication_order(
+        &self,
+        handler: &mut ErrorCollector,
+    ) -> Result<Option<Program>, String> {
+        let mut order = match self.c3_linearize() {
+            Ok(order) => order,
+            Err(err) => return Err(err.to_string()),
+        };
         order.reverse();
-        self.build_program(&order, handler)
+
+        Ok(self.build_program(&order, handler))
     }
 }
 
@@ -687,13 +698,7 @@ impl fmt::Display for Item {
 
 impl fmt::Display for TypeAlias {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "type {} [file_id: {}]  = {};",
-            self.name(),
-            self.file_id(),
-            self.ty()
-        )
+        write!(f, "type {} = {};", self.name(), self.ty())
     }
 }
 
@@ -809,9 +814,11 @@ pub(crate) mod tests {
             parse::Program::parse_from_str_with_errors(&content, source.clone(), &mut handler);
 
         // 5. Check results
-        if handler.has_errors() {
-            panic!("Test Setup Failed: Root file syntax error: {}", ErrorCollector::to_string(&handler));
-        }
+        assert!(
+            !handler.has_errors(),
+            "Test Setup Failed: Root file syntax error: {}",
+            ErrorCollector::to_string(&handler)
+        );
 
         (program.expect("Root parsing failed internally"), source)
     }
@@ -872,7 +879,7 @@ pub(crate) mod tests {
         let root_id = *ids.get("main").unwrap();
         let order = vec![root_id]; // Only one file
 
-        let mut error_handler= ErrorCollector::new();
+        let mut error_handler = ErrorCollector::new();
         let program = graph
             .build_program(&order, &mut error_handler)
             .expect("Failed to build program");
@@ -964,8 +971,8 @@ pub(crate) mod tests {
 
         // Order: A -> B -> Root
         let order = vec![id_a, id_b, id_root];
-        
-        let mut error_handler= ErrorCollector::new();
+
+        let mut error_handler = ErrorCollector::new();
         let result = graph.build_program(&order, &mut error_handler);
 
         assert!(

@@ -137,7 +137,7 @@ impl<T> WithSource<T> for Result<T, RichError> {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct RichError {
     /// The error that occurred.
-    error: Error,
+    error: Box<Error>,
     /// Area that the error spans inside the file.
     span: Span,
     /// File context in which the error occurred.
@@ -150,7 +150,7 @@ impl RichError {
     /// Create a new error with context.
     pub fn new(error: Error, span: Span) -> RichError {
         RichError {
-            error,
+            error: Box::new(error),
             span,
             source: None,
         }
@@ -171,7 +171,7 @@ impl RichError {
     /// a problem on the parsing side.
     pub fn parsing_error(reason: &str) -> Self {
         Self {
-            error: Error::CannotParse(reason.to_string()),
+            error: Box::new(Error::CannotParse(reason.to_string())),
             span: Span::new(0, 0),
             source: None,
         }
@@ -263,7 +263,7 @@ impl std::error::Error for RichError {}
 
 impl From<RichError> for Error {
     fn from(error: RichError) -> Self {
-        error.error
+        *error.error
     }
 }
 
@@ -279,7 +279,7 @@ where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
     fn merge(self, other: Self) -> Self {
-        match (&self.error, &other.error) {
+        match (&*self.error, &*other.error) {
             (Error::Grammar(_), Error::Grammar(_)) => other,
             (Error::Grammar(_), _) => other,
             (_, Error::Grammar(_)) => self,
@@ -315,11 +315,11 @@ where
         let found_string = found.map(|t| t.to_string());
 
         Self {
-            error: Error::Syntax {
+            error: Box::new(Error::Syntax {
                 expected: expected_tokens,
                 label: None,
                 found: found_string,
-            },
+            }),
             span,
             source: None,
         }
@@ -342,11 +342,11 @@ where
         let found_string = found.map(|t| t.to_string());
 
         Self {
-            error: Error::Syntax {
+            error: Box::new(Error::Syntax {
                 expected: expected_strings,
                 label: None,
                 found: found_string,
-            },
+            }),
             span,
             source: None,
         }
@@ -355,7 +355,7 @@ where
     fn label_with(&mut self, label: &'tokens str) {
         if let Error::Syntax {
             label: ref mut l, ..
-        } = &mut self.error
+        } = &mut *self.error
         {
             *l = Some(label.to_string());
         }
@@ -368,13 +368,19 @@ pub struct ErrorCollector {
     errors: Vec<RichError>,
 }
 
+impl Default for ErrorCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ErrorCollector {
     pub fn new() -> Self {
         Self { errors: Vec::new() }
     }
 
-    /// Exend existing errors with concrete RichError.
-    /// We assume that RichError contains SourceFile.
+    /// Extend existing errors with concrete `RichError`.
+    /// We assume that `RichError` contains `SourceFile`.
     pub fn push(&mut self, error: RichError) {
         self.errors.push(error);
     }

@@ -63,7 +63,7 @@ pub enum Item {
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct UseDecl {
     visibility: Visibility,
-    path: Vec<Identifier>, // TODO: Maybe change to Arc<[Identifier]> for consisten
+    path: Vec<Identifier>,
     items: UseItems,
     span: Span,
 }
@@ -96,12 +96,13 @@ impl UseDecl {
 
 impl_eq_hash!(UseDecl; visibility, path, items);
 
-// TODO: Add aliases
+pub type AliasedIdentifier = (Identifier, Option<Identifier>);
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum UseItems {
-    Single(Identifier),
-    List(Vec<Identifier>),
+    Single(AliasedIdentifier),
+    List(Vec<AliasedIdentifier>),
 }
 
 /// Definition of a function.
@@ -692,16 +693,29 @@ impl fmt::Display for UseDecl {
 impl fmt::Display for UseItems {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            UseItems::Single(ident) => write!(f, "{}", ident),
-            UseItems::List(idents) => {
+            UseItems::Single((ident, alias)) => {
+                write!(f, "{};", ident)?;
+
+                if let Some(alias) = alias {
+                    write!(f, " as {}", alias)?;
+                }
+
+                write!(f, ";")
+            }
+            UseItems::List(aliased_idents) => {
                 let _ = write!(f, "{{");
-                for (i, ident) in idents.iter().enumerate() {
+                for (i, (ident, alias)) in aliased_idents.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
+
                     write!(f, "{}", ident)?;
+
+                    if let Some(alias) = alias {
+                        write!(f, " as {}", alias)?
+                    }
                 }
-                write!(f, "}}")
+                write!(f, "}};")
             }
         }
     }
@@ -1366,27 +1380,30 @@ impl ChumskyParse for UseDecl {
     where
         I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
     {
-        // TODO: Check does it possible to parse `use a: : smth`, because we need parse only `use a::smth`
-        let double_colon = just(Token::Colon).then(just(Token::Colon)).labelled("::");
-
         let visibility = just(Token::Pub)
             .to(Visibility::Public)
             .or_not()
             .map(|v| v.unwrap_or(Visibility::Private));
 
         let path = Identifier::parser()
-            .then_ignore(double_colon)
+            .then_ignore(just(Token::DoubleColon))
             .repeated()
             .at_least(1)
             .collect::<Vec<_>>();
 
-        let list = Identifier::parser()
+        let aliased_item = Identifier::parser().then(
+            just(Token::As).ignore_then(Identifier::parser()).or_not(), // Returns None if 'as' missing'
+        );
+
+        let list = aliased_item
+            .clone()
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect()
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(UseItems::List);
-        let single = Identifier::parser().map(UseItems::Single);
+
+        let single = aliased_item.map(UseItems::Single);
         let items = choice((list, single));
 
         visibility
@@ -1531,16 +1548,14 @@ impl ChumskyParse for CallName {
     where
         I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
     {
-        let double_colon = just(Token::Colon).then(just(Token::Colon)).labelled("::");
-
-        let turbofish_start = double_colon.clone().then(just(Token::LAngle)).ignored();
+        let turbofish_start = just(Token::DoubleColon).then(just(Token::LAngle)).ignored();
 
         let generics_close = just(Token::RAngle);
 
         let type_cast = just(Token::LAngle)
             .ignore_then(AliasedType::parser())
             .then_ignore(generics_close.clone())
-            .then_ignore(just(Token::Colon).then(just(Token::Colon)))
+            .then_ignore(just(Token::DoubleColon))
             .then_ignore(just(Token::Ident("into")))
             .map(CallName::TypeCast);
 

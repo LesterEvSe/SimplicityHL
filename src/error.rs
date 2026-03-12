@@ -427,6 +427,7 @@ pub enum Error {
     ListBoundPow2(usize),
     BitStringPow2(usize),
     CannotParse(String),
+    Resolution(String),
     Grammar(String),
     Syntax {
         expected: Vec<String>,
@@ -495,6 +496,10 @@ impl fmt::Display for Error {
             Error::CannotParse(description) => write!(
                 f,
                 "Cannot parse: {description}"
+            ),
+            Error::Resolution(description) => write!(
+                f,
+                "Resolution error: {description}"
             ),
             Error::Grammar(description) => write!(
                 f,

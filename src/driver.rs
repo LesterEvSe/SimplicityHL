@@ -7,7 +7,7 @@ use crate::error::{Error, ErrorCollector, RichError, Span};
 use crate::parse::{self, AliasedIdentifier, ParseFromStrWithErrors, Visibility};
 use crate::str::{AliasName, FunctionName, Identifier};
 use crate::types::AliasedType;
-use crate::{get_full_path, impl_eq_hash, LibTable, SourceFile, SourceName};
+use crate::{impl_eq_hash, DependencyMap, SourceFile, SourceName};
 
 /// Graph Node: One file = One module
 #[derive(Debug, Clone)]
@@ -25,7 +25,7 @@ pub struct ProjectGraph {
 
     /// Fast lookup: Path -> ID
     /// Solves the duplicate problem (so as not to parse a.simf twice)
-    pub libraries: Arc<LibTable>,
+    pub dependency_map: Arc<DependencyMap>,
     pub lookup: HashMap<SourceName, usize>,
     pub paths: Arc<[SourceName]>,
 
@@ -381,7 +381,7 @@ impl ProjectGraph {
 
     pub fn new(
         root_source: SourceFile,
-        libraries: Arc<LibTable>,
+        dependency_map: Arc<DependencyMap>,
         root_program: &parse::Program,
         handler: &mut ErrorCollector,
     ) -> Option<Self> {
@@ -416,11 +416,10 @@ impl ProjectGraph {
             // PHASE 1: Resolve Imports
             for elem in current_program.items() {
                 if let parse::Item::Use(use_decl) = elem {
-                    match get_full_path(&libraries, use_decl) {
+                    match resolve_single_import(importer_source.clone(), use_decl, &dependency_map)
+                    {
                         Ok(path) => valid_imports.push((path, *use_decl.span())),
-                        Err(err) => {
-                            resolution_errors.push(err.with_source(importer_source.clone()))
-                        }
+                        Err(err) => resolution_errors.push(err),
                     }
                 }
             }
@@ -464,7 +463,7 @@ impl ProjectGraph {
         } else {
             Some(Self {
                 modules,
-                libraries,
+                dependency_map,
                 lookup,
                 paths: paths.into(),
                 dependencies,
@@ -673,6 +672,19 @@ impl ProjectGraph {
                 let mut errors: Vec<RichError> = Vec::new();
                 match elem {
                     parse::Item::Use(use_decl) => {
+                        let full_path = match resolve_single_import(
+                            importer_source.clone(),
+                            use_decl,
+                            &self.dependency_map,
+                        ) {
+                            Ok(path) => path,
+                            Err(err) => {
+                                handler.push(err);
+                                continue;
+                            }
+                        };
+
+                        /*
                         let full_path = match get_full_path(&self.libraries, use_decl) {
                             Ok(path) => path,
                             Err(err) => {
@@ -680,6 +692,7 @@ impl ProjectGraph {
                                 continue;
                             }
                         };
+                        */
                         let source_full_path = SourceName::Real(Arc::from(full_path));
                         let ind = self.lookup[&source_full_path];
 
@@ -755,6 +768,33 @@ impl ProjectGraph {
         order.reverse();
 
         Ok(self.build_program(&order, handler))
+    }
+}
+
+/// Resolves a single `use` declaration into a physical file path.
+fn resolve_single_import(
+    importer_source: SourceFile,
+    use_decl: &parse::UseDecl,
+    dependency_map: &DependencyMap,
+) -> Result<PathBuf, RichError> {
+    // TODO: @LesterEvSe or someone else, reconsider this architectural approach.
+    // Consider removing this `match` statement, or dropping `SourceName` from `paths` and `lookup`.
+    let curr_path = match importer_source.name() {
+        SourceName::Real(path) => path,
+        SourceName::Virtual(name) => {
+            // Notice we use `return Err(...)` here instead of `continue`
+            return Err(RichError::new(
+                Error::Resolution(format!(
+                    "Virtual source '{name}' cannot be used to resolve library imports"
+                )),
+                *use_decl.span(),
+            ));
+        }
+    };
+
+    match dependency_map.resolve_path(&curr_path, use_decl) {
+        Ok(path) => Ok(path),
+        Err(err) => Err(err.with_source(importer_source.clone())),
     }
 }
 
@@ -970,9 +1010,30 @@ pub(crate) mod tests {
         (program.expect("Root parsing failed internally"), source)
     }
 
-    /// Sets up a graph with "lib" mapped to "libs/lib".
-    /// Files format: vec![("main.simf", "content"), ("libs/lib/A.simf", "content")]
-    fn setup_graph(files: Vec<(&str, &str)>) -> (ProjectGraph, HashMap<String, usize>, TempDir) {
+    /// Bootstraps a mock file system and attempts to construct a `ProjectGraph`.
+    ///
+    /// This is the low-level, non-panicking test helper. It is designed specifically for
+    /// "negative tests" where you expect the graph construction to fail (e.g., due to syntax
+    /// errors in an imported dependency).
+    ///
+    /// The mock environment automatically maps the alias `"lib"` to the `"libs/lib"` directory.
+    ///
+    /// # Arguments
+    /// * `files` - A vector of tuples containing `(file_path, file_content)`.
+    ///   **Note:** One of the files *must* be named exactly `"main.simf"`.
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// 1. `Option<ProjectGraph>` - `Some` if construction succeeded, `None` if compilation failed.
+    /// 2. `ErrorCollector` - Contains all diagnostics emitted during parsing and resolution.
+    /// 3. `TempDir` - The temporary directory. It must be kept alive until the test completes.
+    ///
+    /// # Panics
+    /// Panics if the `files` vector does not contain a `"main.simf"` entry, or if writing
+    /// the mock files to the OS filesystem fails.
+    fn setup_graph_raw(
+        files: Vec<(&str, &str)>,
+    ) -> (Option<ProjectGraph>, ErrorCollector, TempDir) {
         let temp_dir = TempDir::new().unwrap();
 
         // 1. Create Files
@@ -986,20 +1047,55 @@ pub(crate) mod tests {
         let root_p = root_path.expect("Tests must define 'main.simf'");
 
         // 2. Setup Libraries (Hardcoded "lib" -> "libs/lib" for simplicity in tests)
-        let mut lib_map = HashMap::new();
-        lib_map.insert("lib".to_string(), temp_dir.path().join("libs/lib"));
+        let mut dependency_map = DependencyMap::new();
+        dependency_map.test_insert_without_canonicalize(
+            temp_dir.path(), // The root of mock project
+            "lib".to_string(),
+            &temp_dir.path().join("libs/lib"),
+        );
 
         // 3. Parse & Build
         let (root_program, source) = parse_root(&root_p);
-
         let mut handler = ErrorCollector::new();
 
-        let graph = ProjectGraph::new(source, Arc::from(lib_map), &root_program, &mut handler)
-            .expect(
-                "setup_graph expects a valid graph construction. Use manual setup for error tests.",
-            );
+        let result = ProjectGraph::new(
+            source,
+            Arc::from(dependency_map),
+            &root_program,
+            &mut handler,
+        );
 
-        // 4. Create Lookup (File Name -> ID) for easier asserting
+        // Return the raw result and the handler so the test can inspect the errors
+        (result, handler, temp_dir)
+    }
+
+    /// Bootstraps a mock file system and constructs a valid `ProjectGraph`.
+    ///
+    /// This is the standard test helper for "happy path" scenarios. It wraps [`setup_graph_raw`]
+    /// and mathematically guarantees that the graph construction succeeds. It also generates a
+    /// convenient filename-to-ID lookup map to make asserting on specific files easier.
+    ///
+    /// # Arguments
+    /// * `files` - A vector of tuples containing `(file_path, file_content)`.
+    ///   **Note:** One of the files *must* be named exactly `"main.simf"`.
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// 1. `ProjectGraph` - The fully constructed, valid dependency graph.
+    /// 2. `HashMap<String, usize>` - A mapping of simple filenames (e.g., `"math.simf"`) to their node IDs.
+    /// 3. `TempDir` - The temporary directory. It must be kept alive until the test completes.
+    ///
+    /// # Panics
+    /// Panics if the compiler encounters any errors during parsing or resolution,
+    /// or if `"main.simf"` is missing. For testing compiler errors, use [`setup_graph_raw`] instead.
+    fn setup_graph(files: Vec<(&str, &str)>) -> (ProjectGraph, HashMap<String, usize>, TempDir) {
+        let (graph_result, _handler, temp_dir) = setup_graph_raw(files);
+
+        let graph = graph_result.expect(
+            "setup_graph expects a valid graph construction. Use manual setup for error tests.",
+        );
+
+        // Create Lookup (File Name -> ID) for easier asserting
         let mut file_ids = HashMap::new();
         for (source_name, id) in &graph.lookup {
             let simple_name = match source_name {
@@ -1300,37 +1396,7 @@ pub(crate) mod tests {
         assert!(graph.dependencies[&ids["main"]].is_empty());
     }
 
-    #[test]
-    fn test_missing_file_error() {
-        // MANUAL SETUP REQUIRED
-        // We cannot use `setup_graph` here because we expect `ProjectGraph::new` to fail/return None.
-
-        let temp_dir = TempDir::new().unwrap();
-        let root_path = create_simf_file(temp_dir.path(), "main.simf", "use lib::ghost::Phantom;");
-        // We purposefully DO NOT create ghost.simf
-
-        let mut lib_map = HashMap::new();
-        lib_map.insert("lib".to_string(), temp_dir.path().join("libs/lib"));
-
-        let (root_program, root_source) = parse_root(&root_path);
-        let mut handler = ErrorCollector::new();
-
-        let result =
-            ProjectGraph::new(root_source, Arc::from(lib_map), &root_program, &mut handler);
-
-        assert!(result.is_none(), "Graph construction should fail");
-        assert!(!handler.get().is_empty());
-
-        let error_msg = handler.to_string();
-        assert!(
-            error_msg.contains("File not found") || error_msg.contains("ghost.simf"),
-            "Error message should mention 'ghost.simf' or 'File not found'. Got: {}",
-            error_msg
-        );
-    }
-
     // Tests for aliases
-    // TODO: @LesterEvSe, @Sdoba16 add more tests for alias
     #[test]
     fn test_renaming_with_use() {
         // Scenario: Renaming imports.
@@ -1555,27 +1621,29 @@ Try reordering your `use` statements to avoid cross-wiring."#
     }
 
     // --- Dependent File Error Display Tests ---
+    #[test]
+    fn test_missing_file_error() {
+        let (result, handler, _dir) =
+            setup_graph_raw(vec![("main.simf", "use lib::ghost::Phantom;")]);
+
+        assert!(result.is_none(), "Graph construction should fail");
+        assert!(handler.has_errors());
+
+        let error_msg = handler.to_string();
+        assert!(
+            error_msg.contains("File not found") || error_msg.contains("ghost.simf"),
+            "Error message should mention 'ghost.simf' or 'File not found'. Got: {}",
+            error_msg
+        );
+    }
 
     #[test]
     #[ignore = "TODO(Error_Formatting): The compiler currently strips the .simf extension from file paths during graph construction. This test expects the extension to be preserved."]
     fn test_display_error_in_imported_dependency() {
-        let temp_dir = TempDir::new().unwrap();
-        let root_path = create_simf_file(temp_dir.path(), "main.simf", "use lib::math::add;");
-
-        create_simf_file(
-            temp_dir.path(),
-            "libs/lib/math.simf",
-            "pub fn add(a: u32 b: u32) {}",
-        );
-
-        let mut lib_map = HashMap::new();
-        lib_map.insert("lib".to_string(), temp_dir.path().join("libs/lib"));
-
-        let (root_program, root_source) = parse_root(&root_path);
-        let mut handler = ErrorCollector::new();
-
-        let result =
-            ProjectGraph::new(root_source, Arc::from(lib_map), &root_program, &mut handler);
+        let (result, handler, _dir) = setup_graph_raw(vec![
+            ("main.simf", "use lib::math::add;"),
+            ("libs/lib/math.simf", "pub fn add(a: u32 b: u32) {}"), // NOTE: The comma is missing on purpose.
+        ]);
 
         assert!(
             result.is_none(),

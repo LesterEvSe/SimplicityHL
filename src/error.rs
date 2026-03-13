@@ -466,6 +466,7 @@ pub enum Error {
     ModuleRedefined(ModuleName),
     ArgumentMissing(WitnessName),
     ArgumentTypeMismatch(WitnessName, ResolvedType, ResolvedType),
+    ReservedKeyword(String),
 }
 
 #[rustfmt::skip]
@@ -634,7 +635,14 @@ impl fmt::Display for Error {
             Error::ArgumentTypeMismatch(name, declared, assigned) => write!(
                 f,
                 "Parameter `{name}` was declared with type `{declared}` but its assigned argument is of type `{assigned}`"
+            ),
+            Error::ReservedKeyword(kw) => {
+            write!(
+                f, 
+                "expected identifier, found reserved keyword `{}`\n  help: escape it using `r#{}` to use it as an identifier", 
+                kw, kw
             )
+}
         }
     }
 }

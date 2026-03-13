@@ -220,6 +220,7 @@ pub fn lexer<'src>(
         witness,
         param,
         macros,
+        just("r#").ignore_then(text::ident()).map(Token::Ident),
         keyword,
         hex,
         bin,

@@ -163,7 +163,7 @@ impl TemplateProgram {
         libraries: Arc<LibTable>,
         s: Str,
     ) -> Result<Self, String> {
-        is_reserved_tokens_in_aliases(&libraries)?;
+        // is_reserved_tokens_in_aliases(&libraries)?;
         let source_name = source_name.without_extension();
         let file = s.into();
         let source = SourceFile::new(source_name.clone(), file.clone());
@@ -747,11 +747,32 @@ pub(crate) mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Error: The identifier `jet` is a reserved keyword for intrinsic operations and cannot be utilized as a library name."
+        expected = "expected identifier, found reserved keyword `jet`"
     )]
-    fn using_jet_as_module() {
+    fn using_reserved_keyword_as_module() {
         let main_code = r#"
             use jet::eq_32::SecretType;
+            fn main() {}
+        "#;
+
+        let libs = vec![(
+            "jet",
+            "temp/eq_32.simf",
+            "type SecretType = u32; pub fn ok() {}",
+        )];
+
+        let (test, _dir) = TestCase::temp_env(main_code, libs);
+        test.with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Item `SecretType` is private"
+    )]
+    fn using_reserved_keyword_as_module_properly() {
+        let main_code = r#"
+            use r#jet::eq_32::SecretType;
             fn main() {}
         "#;
 

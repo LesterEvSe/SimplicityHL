@@ -984,10 +984,36 @@ macro_rules! impl_parse_wrapped_string {
             where
                 I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
             {
+                // 1. Map reserved keywords to their string representation
+                let keyword_fallback = select! {
+                    Token::Pub => "pub",
+                    Token::Use => "use",
+                    Token::As => "as",
+                    Token::Fn => "fn",
+                    Token::Let => "let",
+                    Token::Type => "type",
+                    Token::Mod => "mod",
+                    Token::Const => "const",
+                    Token::Match => "match",
+                    Token::Jet(_) => "jet", // or extract the inner string if needed
+                    Token::Witness(_) => "witness",
+                    Token::Param(_) => "param",
+                }
+                .validate(|kw, e, emit| {
+                    // 2. Emit the highly structured RichError instead of a generic string
+                    emit.emit(
+                        Error::ReservedKeyword(kw.to_string()).with_span(e.span())
+                    );
+                    
+                    // 3. Return a dummy value so the parser can attempt to recover
+                    Self::from_str_unchecked("error")
+                });
+
                 select! {
                     Token::Ident(ident) => Self::from_str_unchecked(ident)
                 }
                 .labelled($label)
+                .or(keyword_fallback) // Catch the keyword and emit the rich error
             }
         }
     };

@@ -131,6 +131,10 @@ impl DependencyMap {
         Self::default()
     }
 
+    pub fn inner(&self) -> &[Remapping] {
+        &self.inner
+    }
+
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }

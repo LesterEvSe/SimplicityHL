@@ -22,6 +22,7 @@ use crate::types::{ResolvedType, UIntType};
 /// Area that an object spans inside a file.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Span {
+    // TODO: Add `pub file_id: usize` field
     /// Position where the object starts, inclusively.
     pub start: usize,
     /// Position where the object ends, exclusively.

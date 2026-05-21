@@ -63,7 +63,7 @@ impl Program {
                 }
 
                 // Safe to skip: `Use` items are handled earlier in the loop, and `Module` currently has no functionality.
-                parse::Item::Module | parse::Item::Use(_) => continue,
+                parse::Item::Module(_) | parse::Item::Use(_) | parse::Item::Ignored => continue,
             }
             items.push(new_elem);
         }
@@ -233,7 +233,8 @@ impl DependencyGraph {
                     }
 
                     // Safe to skip: `Use` items are handled earlier in the loop, and `Module` currently has no functionality.
-                    parse::Item::Module | parse::Item::Use(_) => continue,
+                    // TODO: Consider to change it
+                    parse::Item::Module(_) | parse::Item::Use(_) | parse::Item::Ignored => continue,
                 }
                 items.push(new_elem);
             }

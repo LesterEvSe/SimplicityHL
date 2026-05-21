@@ -58,8 +58,10 @@ pub enum Item {
     /// An import declaration (e.g., `use math::add`) that brings another
     /// [`Item`] into the current scope.
     Use(UseDecl),
-    /// A module, which is ignored.
-    Module,
+    /// A module containing a collection of nested items.
+    Module(Module),
+    /// A placeholder used for error recovery during parsing.
+    Ignored,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
@@ -619,50 +621,29 @@ impl MatchPattern {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Module {
+    visibility: Visibility,
     name: ModuleName,
-    assignments: Arc<[ModuleAssignment]>,
+    items: Arc<[Item]>,
     span: Span,
 }
 
 impl Module {
+    pub fn visibility(&self) -> &Visibility {
+        &self.visibility
+    }
+
     /// Access the name of the module.
     pub fn name(&self) -> &ModuleName {
         &self.name
     }
 
-    /// Access the assignments of the module.
-    pub fn assignments(&self) -> &[ModuleAssignment] {
-        &self.assignments
+    pub fn items(&self) -> &[Item] {
+        &self.items
     }
 
     /// Access the span of the module.
     pub fn span(&self) -> &Span {
         &self.span
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ModuleAssignment {
-    name: WitnessName,
-    ty: AliasedType,
-    expression: Expression,
-    span: Span,
-}
-
-impl ModuleAssignment {
-    /// Access the assigned witness name.
-    pub fn name(&self) -> &WitnessName {
-        &self.name
-    }
-
-    /// Access the assigned witness type.
-    pub fn ty(&self) -> &AliasedType {
-        &self.ty
-    }
-
-    /// Access the assigned witness expression.
-    pub fn expression(&self) -> &Expression {
-        &self.expression
     }
 }
 
@@ -681,10 +662,8 @@ impl fmt::Display for Item {
             Self::TypeAlias(alias) => write!(f, "{alias}"),
             Self::Function(function) => write!(f, "{function}"),
             Self::Use(use_declaration) => write!(f, "{use_declaration}"),
-            // The parse tree contains no information about the contents of modules.
-            // We print a random empty module `mod witness {}` here
-            // so that `from_string(to_string(x)) = x` holds for all trees `x`.
-            Self::Module => write!(f, "mod witness {{}}"),
+            Self::Module(module) => write!(f, "{module}"),
+            Self::Ignored => Ok(()),
         }
     }
 }
@@ -724,6 +703,12 @@ impl fmt::Display for Function {
             write!(f, " -> {ty}")?;
         }
         write!(f, " {}", self.body())
+    }
+}
+
+impl fmt::Display for FunctionParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.identifier(), self.ty())
     }
 }
 
@@ -776,9 +761,13 @@ impl fmt::Display for UseItems {
     }
 }
 
-impl fmt::Display for FunctionParam {
+impl fmt::Display for Module {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.identifier(), self.ty())
+        write!(f, "{}mod {}{{", self.visibility(), self.name())?;
+        for item in self.items() {
+            write!(f, "{item}")?;
+        }
+        write!(f, "}}")
     }
 }
 
@@ -1335,8 +1324,7 @@ impl ChumskyParse for Program {
                     })
                     .repeated(),
             )
-            // map to empty module
-            .map_with(|_, _| Item::Module);
+            .map_with(|_, _| Item::Ignored);
 
         Item::parser()
             .recover_with(via_parser(skip_until_next_item))
@@ -1354,12 +1342,16 @@ impl ChumskyParse for Item {
     where
         I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
     {
-        let func_parser = Function::parser().map(Item::Function);
-        let type_parser = TypeAlias::parser().map(Item::TypeAlias);
-        let use_parser = UseDecl::parser().map(Item::Use);
-        let mod_parser = Module::parser().map(|_| Item::Module);
+        recursive(|item| {
+            let func_parser = Function::parser().map(Item::Function);
+            let type_parser = TypeAlias::parser().map(Item::TypeAlias);
+            let use_parser = UseDecl::parser().map(Item::Use);
 
-        choice((func_parser, use_parser, type_parser, mod_parser))
+            // Lazy item here
+            let mod_parser = Module::parser_with_items(item).map(Item::Module);
+
+            choice((func_parser, use_parser, type_parser, mod_parser))
+        })
     }
 }
 
@@ -2063,14 +2055,21 @@ impl Match {
     }
 }
 
-impl ChumskyParse for Module {
-    fn parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Self, ParseError<'src>> + Clone
+impl Module {
+    pub fn parser_with_items<'tokens, 'src: 'tokens, I>(
+        item_parser: impl Parser<'tokens, I, Item, ParseError<'src>> + Clone + 'tokens,
+    ) -> impl Parser<'tokens, I, Self, ParseError<'src>> + Clone
     where
         I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
     {
+        let visibility = just(Token::Pub)
+            .to(Visibility::Public)
+            .or_not()
+            .map(Option::unwrap_or_default);
+
         let name = ModuleName::parser().map_with(|name, e| (name, e.span()));
 
-        let assignments = ModuleAssignment::parser()
+        let items = item_parser
             .repeated()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
@@ -2085,35 +2084,12 @@ impl ChumskyParse for Module {
             )))
             .map(Arc::from);
 
-        just(Token::Mod)
-            .ignore_then(name)
-            .then(assignments)
-            .map_with(|(name, assignments), e| Self {
+        visibility
+            .then(just(Token::Mod).ignore_then(name).then(items))
+            .map_with(|(visibility, (name, items)), e| Self {
+                visibility,
                 name: name.0,
-                assignments,
-                span: e.span(),
-            })
-    }
-}
-
-impl ChumskyParse for ModuleAssignment {
-    fn parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Self, ParseError<'src>> + Clone
-    where
-        I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
-    {
-        let name = WitnessName::parser();
-
-        just(Token::Const)
-            .ignore_then(name)
-            .then_ignore(just(Token::Colon))
-            .then(AliasedType::parser())
-            .then_ignore(just(Token::Eq))
-            .then(Expression::parser())
-            .then_ignore(just(Token::Semi))
-            .map_with(|((name, ty), expression), e| Self {
-                name,
-                ty,
-                expression,
+                items,
                 span: e.span(),
             })
     }
@@ -2179,20 +2155,25 @@ impl AsRef<Span> for Module {
     }
 }
 
-impl AsRef<Span> for ModuleAssignment {
-    fn as_ref(&self) -> &Span {
-        &self.span
+#[cfg(feature = "arbitrary")]
+pub(crate) fn generate_arbitrary_items<'a>(
+    u: &mut arbitrary::Unstructured<'a>,
+) -> arbitrary::Result<Vec<Item>> {
+    let mut items_vec = Vec::new();
+
+    let len = u.int_in_range(0..=2)?;
+    for _ in 0..len {
+        items_vec.push(<Item as arbitrary::Arbitrary>::arbitrary(u)?);
     }
+
+    Ok(items_vec)
 }
 
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Program {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let mut items_vec: Vec<Item> = Vec::new();
-        let len = u.int_in_range(0..=2)?;
-        for _ in 0..len {
-            items_vec.push(Item::arbitrary(u)?);
-        }
+        let mut items_vec = generate_arbitrary_items(u)?;
+
         // Three equally-likely modes for how `fn main()` is injected:
         //   0 — no explicit main (arbitrary items only)
         //   1 — main with arbitrary params and return type
@@ -2249,6 +2230,22 @@ impl crate::ArbitraryRec for Function {
             params,
             ret,
             body,
+            span: Span::DUMMY,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Module {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let visibility = Visibility::arbitrary(u)?;
+        let name = ModuleName::arbitrary(u)?;
+        let items_vec = generate_arbitrary_items(u)?;
+
+        Ok(Self {
+            visibility,
+            name,
+            items: items_vec.into(),
             span: Span::DUMMY,
         })
     }

@@ -12,7 +12,7 @@ use crate::debug::{CallTracker, DebugSymbols, TrackedCallName};
 use crate::driver::{FileScoped, SymbolTable, MAIN_MODULE, MAIN_STR};
 use crate::error::{Error, RichError, Span, WithSpan};
 use crate::num::{NonZeroPow2Usize, Pow2Usize};
-use crate::parse::MatchPattern;
+use crate::parse::{MatchPattern, Visibility};
 use crate::pattern::Pattern;
 use crate::str::{AliasName, FunctionName, Identifier, ModuleName, WitnessName};
 use crate::types::{
@@ -74,8 +74,10 @@ pub enum Item {
     TypeAlias,
     /// A function.
     Function(Function),
-    /// A module, which is ignored.
+    /// Stub, resolved during the creating of the AST.
     Module,
+    /// A placeholder used for error recovery during parsing.
+    Ignored,
 }
 
 /// Definition of a function.
@@ -404,48 +406,17 @@ impl MatchArm {
     }
 }
 
-/// Item when analyzing modules.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ModuleItem {
-    Ignored,
-    Module(Module),
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Module {
+    visibility: Visibility,
     name: ModuleName,
-    assignments: Arc<[ModuleAssignment]>,
+    items: Arc<[Item]>,
     span: Span,
 }
 
 impl Module {
-    /// Access the assignments of the module.
-    pub fn assignments(&self) -> &[ModuleAssignment] {
-        &self.assignments
-    }
-
-    /// Access the span of the module.
-    pub fn span(&self) -> &Span {
-        &self.span
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ModuleAssignment {
-    name: WitnessName,
-    value: Value,
-    span: Span,
-}
-
-impl ModuleAssignment {
-    /// Access the assigned witness name.
-    pub fn name(&self) -> &WitnessName {
-        &self.name
-    }
-
-    /// Access the assigned witness value.
-    pub fn value(&self) -> &Value {
-        &self.value
+    pub fn items(&self) -> &[Item] {
+        &self.items
     }
 
     /// Access the span of the module.
@@ -899,7 +870,8 @@ impl AbstractSyntaxTree for Item {
                 Error::CannotCompile("The `use` keyword is not supported yet.".to_string()),
                 *use_decl.span(),
             )),
-            parse::Item::Module => Ok(Self::Module),
+            parse::Item::Module(module) => panic!("Plug by now: {}", module),
+            parse::Item::Ignored => Ok(Self::Ignored),
         };
 
         scope.file_id = previous_file_id;
@@ -1568,46 +1540,6 @@ impl AbstractSyntaxTree for Match {
     }
 }
 
-impl AbstractSyntaxTree for Module {
-    type From = parse::Module;
-
-    fn analyze(from: &Self::From, ty: &ResolvedType, scope: &mut Scope) -> Result<Self, RichError> {
-        assert!(ty.is_unit(), "Modules cannot return anything");
-        assert!(scope.is_topmost(), "Modules live in the topmost scope only");
-        let assignments = from
-            .assignments()
-            .iter()
-            .map(|s| ModuleAssignment::analyze(s, ty, scope))
-            .collect::<Result<Arc<[ModuleAssignment]>, RichError>>()?;
-        debug_assert!(scope.is_topmost());
-
-        Ok(Self {
-            name: from.name().shallow_clone(),
-            span: *from.as_ref(),
-            assignments,
-        })
-    }
-}
-
-impl AbstractSyntaxTree for ModuleAssignment {
-    type From = parse::ModuleAssignment;
-
-    fn analyze(from: &Self::From, ty: &ResolvedType, scope: &mut Scope) -> Result<Self, RichError> {
-        assert!(ty.is_unit(), "Assignments cannot return anything");
-        let ty_expr = scope.resolve(from.ty()).with_span(from)?;
-        let expression = Expression::analyze(from.expression(), &ty_expr, scope)?;
-        let value = Value::from_const_expr(&expression)
-            .ok_or(Error::ExpressionUnexpectedType(ty_expr.clone()))
-            .with_span(from.expression())?;
-
-        Ok(Self {
-            name: from.name().clone(),
-            value,
-            span: *from.as_ref(),
-        })
-    }
-}
-
 impl AsRef<Span> for Assignment {
     fn as_ref(&self) -> &Span {
         &self.span
@@ -1639,12 +1571,6 @@ impl AsRef<Span> for Match {
 }
 
 impl AsRef<Span> for Module {
-    fn as_ref(&self) -> &Span {
-        &self.span
-    }
-}
-
-impl AsRef<Span> for ModuleAssignment {
     fn as_ref(&self) -> &Span {
         &self.span
     }

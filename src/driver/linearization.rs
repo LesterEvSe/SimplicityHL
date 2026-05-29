@@ -58,6 +58,11 @@ impl DependencyGraph {
             .map_or(&[] as &[usize], |v| v.as_slice());
 
         for &parent in parents {
+            // Ignore self-imports. Test it properly
+            if parent == module {
+                continue;
+            }
+
             self.dfs_linearize(parent, visited, visiting, order)?;
         }
 

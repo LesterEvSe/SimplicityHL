@@ -1,0 +1,27 @@
+mod file_2 {
+    pub type Smth = u32;
+
+    pub fn get_five() -> u32 {
+        5
+    }
+}
+
+mod file_1 {
+    pub use crate::file_2::Smth;
+
+    pub fn two() -> Smth {
+        2
+    }
+}
+
+pub use crate::file_1::two as smth;
+use crate::file_2::{get_five, Smth};
+
+fn seven() -> u32 {
+    7
+}
+
+fn main() {
+    let (_, temp): (bool, u32) = jet::add_32(smth(), get_five());
+    assert!(jet::eq_32(temp, seven()));
+}

@@ -59,6 +59,18 @@ pub struct TemplateProgram {
 }
 
 impl TemplateProgram {
+    /// Parses and flattens a multi-file program into a single enriched [`parse::Program`]
+    /// with all imports resolved and each file wrapped in a `file_N` module.
+    pub fn flatten(
+        source: CanonSourceFile,
+        dependency_map: &DependencyMap,
+    ) -> Result<String, String> {
+        let mut error_handler = ErrorCollector::new();
+        Self::dependency_helper(source, dependency_map, &mut error_handler)?
+            .ok_or_else(|| error_handler.to_string())
+            .map(|p| p.to_string())
+    }
+
     /// Parse the template of a SimplicityHL program.
     ///
     /// ## Errors
@@ -71,25 +83,10 @@ impl TemplateProgram {
     ) -> Result<Self, String> {
         let mut error_handler = ErrorCollector::new();
 
-        // 1. Parse root file
-        let parsed_program =
-            parse::Program::parse_from_str_with_errors(source.clone(), &mut error_handler)
+        let driver_program =
+            Self::dependency_helper(source.clone(), dependency_map, &mut error_handler)?
                 .ok_or_else(|| error_handler.to_string())?;
 
-        // 2. Create the driver program
-        let graph = DependencyGraph::new(
-            source.clone(),
-            Arc::from(dependency_map.clone()),
-            &parsed_program,
-            &mut error_handler,
-        )?
-        .ok_or_else(|| error_handler.to_string())?;
-
-        let driver_program: driver::Program = graph
-            .linearize_and_build(&mut error_handler)?
-            .ok_or_else(|| error_handler.to_string())?;
-
-        // 3. AST Analysis
         let ast_program = ast::Program::analyze(&driver_program, jet_hinter.clone_box())
             .with_source(source.clone())?;
         Ok(Self {
@@ -113,13 +110,7 @@ impl TemplateProgram {
         let mut error_handler = ErrorCollector::new();
         let parse_program = parse::Program::parse_from_str_with_errors(source, &mut error_handler);
 
-        let driver_program = if let Some(parse_program) = parse_program {
-            driver::Program::from_parse(&parse_program, file.clone(), &mut error_handler)
-        } else {
-            None
-        };
-
-        if let Some(program) = driver_program {
+        if let Some(program) = parse_program {
             let ast_program = ast::Program::analyze(&program, jet_hinter.clone_box())
                 .with_content(Arc::clone(&file))?;
             Ok(Self {
@@ -128,8 +119,21 @@ impl TemplateProgram {
                 jet_hinter,
             })
         } else {
-            Err(ErrorCollector::to_string(&error_handler))?
+            Err(error_handler.to_string())?
         }
+    }
+
+    fn dependency_helper(
+        source: CanonSourceFile,
+        dependency_map: &DependencyMap,
+        handler: &mut ErrorCollector,
+    ) -> Result<Option<parse::Program>, String> {
+        let program = parse::Program::parse_from_str_with_errors(source.clone(), handler)
+            .ok_or_else(|| handler.to_string())?;
+        let graph =
+            DependencyGraph::new(source, Arc::from(dependency_map.clone()), &program, handler)?
+                .ok_or_else(|| handler.to_string())?;
+        graph.linearize_and_build(handler)
     }
 
     /// Access the parameters of the program.
@@ -426,6 +430,54 @@ pub(crate) mod tests {
 
     use crate::*;
 
+    const FLATTENED: &str = "flattened.simf";
+    pub(crate) const MAIN: &str = "main.simf";
+
+    pub(crate) fn flatten_template_file(
+        prog_path: &Path,
+        dependency_map: &DependencyMap,
+    ) -> String {
+        let program_text = std::fs::read_to_string(prog_path).unwrap();
+        let source = CanonSourceFile::new(
+            CanonPath::canonicalize(prog_path).unwrap(),
+            Arc::from(program_text),
+        );
+
+        match TemplateProgram::flatten(source, dependency_map) {
+            Ok(single_file) => single_file,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    pub(crate) fn format_program_file(prog_path: &Path) -> String {
+        let file = Arc::<str>::from(std::fs::read_to_string(prog_path).unwrap());
+        let source = SourceFile::anonymous(file.clone());
+
+        let mut error_handler = ErrorCollector::new();
+        let parse_program =
+            parse::Program::parse_from_str_with_errors(source, &mut error_handler).unwrap();
+        parse_program.to_string()
+    }
+
+    pub(crate) fn build_dependency_map<P, I, K>(prog_path: P, dependencies: I) -> DependencyMap
+    where
+        P: AsRef<Path>,
+        I: IntoIterator<Item = (P, K, P)>,
+        K: Into<String>,
+    {
+        let parent = prog_path.as_ref().parent().unwrap();
+        let canon_root = canon(parent);
+        let mut builder = DependencyMapBuilder::new(canon_root);
+
+        for (context, alias, target) in dependencies {
+            let context = canon(context.as_ref());
+            let target = canon(target.as_ref());
+
+            builder = builder.add_dependency(context, alias.into(), target);
+        }
+        builder.build().unwrap()
+    }
+
     pub(crate) struct TestCase<T> {
         program: T,
         lock_time: elements::LockTime,
@@ -442,7 +494,7 @@ pub(crate) mod tests {
         pub fn template_deps(prog_path: &Path, dependency_map: &DependencyMap) -> Self {
             let program_text = std::fs::read_to_string(prog_path).unwrap();
             let source = CanonSourceFile::new(
-                crate::source::CanonPath::canonicalize(prog_path).unwrap(),
+                CanonPath::canonicalize(prog_path).unwrap(),
                 Arc::from(program_text),
             );
 
@@ -517,26 +569,11 @@ pub(crate) mod tests {
                 .with_arguments(Arguments::default())
         }
 
-        pub fn program_file_with_deps<P, I, K>(prog_path: P, dependencies: I) -> Self
-        where
-            P: AsRef<Path>,
-            I: IntoIterator<Item = (P, K, P)>,
-            K: Into<String>,
-        {
-            let parent = prog_path.as_ref().parent().unwrap();
-            let canon_root = canon(parent);
-            let mut builder = DependencyMapBuilder::new(canon_root);
-
-            for (context, alias, target) in dependencies {
-                let context = canon(context.as_ref());
-                let target = canon(target.as_ref());
-
-                builder = builder.add_dependency(context, alias.into(), target);
-            }
-
-            let dependency_map = builder.build().unwrap();
-
-            TestCase::<TemplateProgram>::template_deps(prog_path.as_ref(), &dependency_map)
+        pub fn program_file_with_deps(
+            prog_path: impl AsRef<Path>,
+            dependency_map: &DependencyMap,
+        ) -> Self {
+            TestCase::<TemplateProgram>::template_deps(prog_path.as_ref(), dependency_map)
                 .with_arguments(Arguments::default())
         }
 
@@ -646,11 +683,32 @@ pub(crate) mod tests {
     pub(crate) fn run_dependency_test(root_path: &str, lib_alias: &str) {
         let root_path = PathBuf::from(root_path);
         let lib_path = root_path.join(lib_alias);
-        let main_path = root_path.join("main.simf");
+        let main_path = root_path.join(MAIN);
 
-        TestCase::program_file_with_deps(&main_path, [(&root_path, lib_alias, &lib_path)])
+        let dependency_map = build_dependency_map(&main_path, [(&root_path, lib_alias, &lib_path)]);
+
+        TestCase::program_file_with_deps(&main_path, &dependency_map)
             .with_witness_values(WitnessValues::default())
             .assert_run_success();
+    }
+
+    /// THE DEFAULT HELPER
+    pub(crate) fn flatten_dependency_test(root_path: &str, lib_alias: &str) {
+        let root_path = PathBuf::from(root_path);
+        let lib_path = root_path.join(lib_alias);
+        let main_path = root_path.join(MAIN);
+        let flattened_path = root_path.join(FLATTENED);
+
+        let dependency_map = build_dependency_map(&main_path, [(&root_path, lib_alias, &lib_path)]);
+
+        let expected = format_program_file(&flattened_path);
+        let actual = flatten_template_file(&main_path, &dependency_map);
+
+        println!("Expected:\n{}", expected);
+        println!("----------");
+        println!("Actual:\n{}", actual);
+
+        assert_eq!(expected, actual);
     }
 
     /// THE ADVANCED HELPER
@@ -659,7 +717,7 @@ pub(crate) mod tests {
     /// Use `"."` for the `context_folder` if the context is the root test directory.
     pub(crate) fn run_multidep_test(root_path: &str, deps: &[(&str, &str, &str)]) {
         let root_path = PathBuf::from(root_path);
-        let main_path = root_path.join("main.simf");
+        let main_path = root_path.join(MAIN);
 
         // Convert the string slices into proper PathBufs dynamically
         let mapped_deps: Vec<(PathBuf, &str, PathBuf)> = deps
@@ -678,10 +736,48 @@ pub(crate) mod tests {
             .collect();
 
         let ref_deps = mapped_deps.iter().map(|(c, a, t)| (c, *a, t));
-
-        TestCase::program_file_with_deps(&main_path, ref_deps)
+        let dependency_map = dbg!(build_dependency_map(&main_path, ref_deps));
+        TestCase::program_file_with_deps(&main_path, &dependency_map)
             .with_witness_values(WitnessValues::default())
             .assert_run_success();
+    }
+
+    /// THE ADVANCED HELPER
+    /// A helper function to run standard library dependency tests.
+    /// `deps` expects an array of tuples: `(context_folder, alias, target_folder)`.
+    /// Use `"."` for the `context_folder` if the context is the root test directory.
+    pub(crate) fn flatten_multidep_test(root_path: &str, deps: &[(&str, &str, &str)]) {
+        let root_path = PathBuf::from(root_path);
+        let main_path = root_path.join(MAIN);
+        let flattened_path = root_path.join(FLATTENED);
+
+        // Convert the string slices into proper PathBufs dynamically
+        let mapped_deps: Vec<(PathBuf, &str, PathBuf)> = deps
+            .iter()
+            .map(|(ctx, alias, target)| {
+                let ctx_path = if *ctx == "." {
+                    root_path.clone()
+                } else {
+                    root_path.join(ctx)
+                };
+
+                let target_path = root_path.join(target);
+
+                (ctx_path, *alias, target_path)
+            })
+            .collect();
+
+        let ref_deps = mapped_deps.iter().map(|(c, a, t)| (c, *a, t));
+        let dependency_map = build_dependency_map(&main_path, ref_deps);
+
+        let expected = format_program_file(&flattened_path);
+        let actual = flatten_template_file(&main_path, &dependency_map);
+
+        println!("Expected:\n{}", expected);
+        println!("----------");
+        println!("Actual:\n{}", actual);
+
+        assert_eq!(expected, actual);
     }
 
     /// Run with `simc` command:
@@ -695,6 +791,11 @@ pub(crate) mod tests {
         run_dependency_test("./examples/single_dep", "temp");
     }
 
+    #[test]
+    fn flatten_single_dep() {
+        flatten_dependency_test("./examples/single_dep", "temp");
+    }
+
     /// Run with `simc` command:
     ///
     /// ```
@@ -705,6 +806,14 @@ pub(crate) mod tests {
     #[test]
     fn simple_multidep() {
         run_multidep_test(
+            "./examples/simple_multidep",
+            &[(".", "math", "math"), (".", "crypto", "crypto")],
+        );
+    }
+
+    #[test]
+    fn flatten_simple_multidep() {
+        flatten_multidep_test(
             "./examples/simple_multidep",
             &[(".", "math", "math"), (".", "crypto", "crypto")],
         );
@@ -730,6 +839,18 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn flatten_multiple_deps() {
+        flatten_multidep_test(
+            "./examples/multiple_deps",
+            &[
+                (".", "merkle", "merkle"),
+                (".", "base_math", "math"),
+                ("merkle", "math", "math"),
+            ],
+        );
+    }
+
     /// Run with `simc` command:
     ///
     /// ```
@@ -745,7 +866,7 @@ pub(crate) mod tests {
         let ws = TempWorkspace::new("crate_success");
         let root = ws.create_dir("workspace");
         ws.create_file(
-            "workspace/main.simf",
+            format!("workspace/{MAIN}").as_str(),
             "use crate::utils::add;\nfn main() { assert!(jet::eq_32(add(2, 2), 4)); }",
         );
         ws.create_file(
@@ -753,7 +874,7 @@ pub(crate) mod tests {
             "pub fn add(a: u32, b: u32) -> u32 { let (_, sum): (bool, u32) = jet::add_32(a, b); sum }",
         );
 
-        let main_path = root.join("main.simf");
+        let main_path = root.join(MAIN);
         let canon_root = CanonPath::canonicalize(&root).unwrap();
 
         let dependency_map = DependencyMapBuilder::new(canon_root).build().unwrap();
@@ -777,6 +898,13 @@ pub(crate) mod tests {
     #[test]
     fn cat() {
         TestCase::program_file("./examples/cat.simf")
+            .with_witness_values(WitnessValues::default())
+            .assert_run_success();
+    }
+
+    #[test]
+    fn modules() {
+        TestCase::program_file("./examples/modules.simf")
             .with_witness_values(WitnessValues::default())
             .assert_run_success();
     }
@@ -1178,6 +1306,7 @@ fn main() {
 mod error_tests {
     use std::path::Path;
 
+    use super::tests::MAIN;
     use super::*;
 
     use crate::ast::ElementsJetHinter;
@@ -1208,7 +1337,7 @@ mod error_tests {
         let root_dir = ws.create_dir("workspace");
         let lib_dir = ws.create_dir("workspace/lib");
         let main_path = ws.create_file(
-            "workspace/main.simf",
+            format!("workspace/{MAIN}").as_str(),
             "use lib::bad::f;\nfn main() { f(); }\n",
         );
         let bad_path = ws.create_file(
@@ -1238,7 +1367,7 @@ mod error_tests {
         let root_dir = ws.create_dir("workspace");
         let lib_dir = ws.create_dir("workspace/lib");
         let main_path = ws.create_file(
-            "workspace/main.simf",
+            format!("workspace/{MAIN}").as_str(),
             "use lib::nested::two;\nfn main() { assert!(jet::eq_32(two(), 2)); }\n",
         );
         ws.create_file(
@@ -1262,7 +1391,7 @@ mod error_tests {
         let root_dir = ws.create_dir("workspace");
         let lib_dir = ws.create_dir("workspace/lib");
         let main_path = ws.create_file(
-            "workspace/main.simf",
+            format!("workspace/{MAIN}").as_str(),
             "use lib::missing::Thing;\nfn main() {}\n",
         );
         let dependencies = dependency_map(&root_dir, "lib", &lib_dir);
@@ -1390,7 +1519,7 @@ mod functional_tests {
     }
 
     #[test]
-    #[should_panic(expected = "The alias `add` was defined multiple times")]
+    #[should_panic(expected = "Item `add` was defined multiple times")]
     fn name_collision_error() {
         run_dependency_test(
             format!("{}/name-collision", ERROR_TESTS_DIR).as_str(),

@@ -12,6 +12,7 @@ use chumsky::DefaultExpected;
 
 use itertools::Itertools;
 
+use crate::driver::CRATE_STR;
 use crate::lexer::Token;
 use crate::parse::MatchPattern;
 use crate::source::SourceFile;
@@ -21,6 +22,7 @@ use crate::types::{ResolvedType, UIntType};
 /// Area that an object spans inside a file.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Span {
+    // TODO: Add `pub file_id: usize` field
     /// Position where the object starts, inclusively.
     pub start: usize,
     /// Position where the object ends, exclusively.
@@ -559,6 +561,7 @@ pub enum Error {
     PrivateItem {
         name: String,
     },
+    MissingCrateKeyword,
     MainNoInputs,
     MainNoOutput,
     MainRequired,
@@ -623,6 +626,12 @@ pub enum Error {
     },
     WitnessOutsideMain,
     ModuleRedefined {
+        name: ModuleName,
+    },
+    ModuleNotFound {
+        name: ModuleName,
+    },
+    ModuleIsPrivate {
         name: ModuleName,
     },
     ArgumentMissing {
@@ -731,6 +740,10 @@ impl fmt::Display for Error {
             Error::InvalidCast { source, target } => write!(
                 f,
                 "Cannot cast values of type `{source}` as values of type `{target}`"
+            ),
+            Error::MissingCrateKeyword => write!(
+                f,
+                "Imports must begin with the `{CRATE_STR}` keyword in single-file programs",
             ),
             Error::MainNoInputs => write!(
                 f,
@@ -846,7 +859,15 @@ impl fmt::Display for Error {
             ),
             Error::ModuleRedefined { name } => write!(
                 f,
-                "Module `{name}` is defined twice"
+                "Module `{name}` was defined multiple times"
+            ),
+            Error::ModuleNotFound { name } => write!(
+                f,
+                "Module `{name}` not found"
+            ),
+            Error::ModuleIsPrivate { name } => write!(
+                f,
+                "Module `{name}` is private",
             ),
             Error::ArgumentMissing { name } => write!(
                 f,

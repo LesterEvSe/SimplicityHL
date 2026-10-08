@@ -5,7 +5,7 @@ use miniscript::iter::{Tree, TreeLike};
 use simplicity::types::{CompleteBound, Final};
 
 use super::{TypeConstructible, UIntType};
-use crate::array::{BTreeSlice, Partition};
+use crate::array::BTreeSlice;
 use crate::num::NonZeroPow2Usize;
 
 /// Internal structure of a SimplicityHL type.
@@ -101,30 +101,37 @@ impl TypeConstructible for StructuralType {
         Self(Final::product(left.0, right.0))
     }
 
+    // Builds `size` copies in the shape of `BTreeSlice` from O(log size) shared subtrees.
+    // Prevent OOM.
     fn array(element: Self, size: usize) -> Self {
-        // Cheap clone because Arc<Final> consists of Arcs
-        let elements = vec![element; size];
-        let tree = BTreeSlice::from_slice(&elements);
-        tree.fold(Self::product).unwrap_or_else(Self::unit)
+        let bits = (usize::BITS - size.leading_zeros()) as usize;
+        Self::pow2_arrays(element)
+            .take(bits)
+            .enumerate()
+            .filter(|(i, _)| size >> i & 1 == 1)
+            .map(|(_, array)| array)
+            .reduce(Self::product)
+            .unwrap_or_else(Self::unit)
     }
 
+    // Shape of `Partition`: one optional block per power of two below `bound`, largest first.
     fn list(element: Self, bound: NonZeroPow2Usize) -> Self {
-        // Cheap clone because Arc<Final> consists of Arcs
-        let el_vector = vec![element.0; bound.get() - 1];
-        let partition = Partition::from_slice(&el_vector, bound);
-        debug_assert!(partition.is_complete());
-        let process = |block: &[Arc<Final>], size: usize| -> Arc<Final> {
-            debug_assert_eq!(block.len(), size);
-            let tree = BTreeSlice::from_slice(block);
-            let array = tree.fold(Final::product).unwrap();
-            Final::sum(Final::unit(), array)
-        };
-        let inner = partition.fold(process, Final::product);
-        Self(inner)
+        Self::pow2_arrays(element)
+            .take(bound.log2().get() as usize)
+            .map(Self::option)
+            .reduce(|smaller, block| Self::product(block, smaller))
+            .expect("bound is at least 2")
     }
 }
 
 impl StructuralType {
+    /// Arrays of `element` of size `2^0`, `2^1`, `2^2`, and so on.
+    fn pow2_arrays(element: Self) -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(element), |array| {
+            Some(Self::product(array.clone(), array.clone()))
+        })
+    }
+
     /// The balanced sum of the given leaf types.
     /// The structural type of an enum whose variants have these payload types.
     /// The tree shape is the one of [`BTreeSlice`], values ([`StructuralValue::enum_injection`])

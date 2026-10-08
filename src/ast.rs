@@ -18,7 +18,7 @@ use crate::pattern::Pattern;
 use crate::str::{AliasName, FunctionName, Identifier, ModuleName, SymbolName};
 use crate::types::{
     AliasedType, EnumInfo, EnumVariantInfo, ResolvedType, StructuralType, TypeConstructible,
-    TypeDeconstructible, TypeInner, UIntType,
+    TypeDeconstructible, TypeInner, UIntType, MAX_TYPE_BIT_WIDTH,
 };
 use crate::value::{UIntValue, Value};
 use crate::witness::{Parameters, WitnessTypes};
@@ -807,6 +807,44 @@ struct ModuleScope {
     submodules: HashMap<ModuleName, (ModuleScope, Visibility)>,
 }
 
+/// Error if the type exceeds [`MAX_TYPE_BIT_WIDTH`].
+///
+/// Values are as wide as their type, so building one for a wider type could exhaust memory.
+/// Sizes are checked separately because arrays and lists of zero-width elements have no width.
+fn check_type_size(ty: &ResolvedType) -> Result<(), Error> {
+    for node in ty.pre_order_iter() {
+        match node.as_inner() {
+            TypeInner::Array(_, size) if MAX_TYPE_BIT_WIDTH < *size => {
+                return Err(Error::ArraySizeTooLarge { size: *size });
+            }
+            TypeInner::List(_, bound) if MAX_TYPE_BIT_WIDTH < bound.get() => {
+                return Err(Error::ListBoundTooLarge { bound: bound.get() });
+            }
+            _ => {}
+        }
+    }
+
+    let bit_width = bit_width(ty);
+    if MAX_TYPE_BIT_WIDTH < bit_width {
+        return Err(Error::TypeTooLarge {
+            ty: ty.clone(),
+            bit_width,
+        });
+    }
+
+    Ok(())
+}
+
+/// Bit width of the values of the type.
+///
+/// The never type has no values, so its width counts as zero.
+fn bit_width(ty: &ResolvedType) -> usize {
+    if ty.pre_order_iter().any(|node| node.is_never()) {
+        return 0;
+    }
+    StructuralType::from(ty).as_ref().bit_width()
+}
+
 /// Scope for generating the abstract syntax tree.
 ///
 /// The scope is used for:
@@ -826,6 +864,8 @@ struct Scope {
     variables: Vec<HashMap<Identifier, ResolvedType>>,
     parameters: HashMap<TemplateProgramWitness, ResolvedType>,
     witnesses: HashMap<TemplateProgramWitness, ResolvedType>,
+    /// Total bit width of the parameter and witness types.
+    values_bit_width: usize,
     /// Allow enum constructions to name an enum by its declared name even
     /// when that name is not an alias in scope. Enabled only for value
     /// parsing (witness and argument files), which runs without a scope.
@@ -854,6 +894,7 @@ impl Scope {
             variables: Vec::new(),
             parameters: HashMap::new(),
             witnesses: HashMap::new(),
+            values_bit_width: 0,
             unscoped_enum_names: false,
             is_main: false,
             call_tracker: CallTracker::default(),
@@ -1323,8 +1364,12 @@ impl Scope {
     /// ## Errors
     ///
     /// * [`Error::UndefinedAlias`]: The alias is not found in the global registry.
+    /// * [`Error::ArraySizeTooLarge`], [`Error::ListBoundTooLarge`], [`Error::TypeTooLarge`]:
+    ///   The type exceeds [`MAX_TYPE_BIT_WIDTH`].
     pub fn resolve(&self, ty: &AliasedType) -> Result<ResolvedType, Error> {
-        ty.resolve(|name| self.get_alias(name))
+        let resolved = ty.resolve(|name| self.get_alias(name))?;
+        check_type_size(&resolved)?;
+        Ok(resolved)
     }
 
     /// Error if `name` is already defined as an alias in the current module.
@@ -1388,6 +1433,7 @@ impl Scope {
     /// ## Errors
     ///
     /// * [`Error::ExpressionTypeMismatch`] A parameter of the same name has already been defined as a different type.
+    /// * [`Error::ValuesTooLarge`] The parameters and witnesses together exceed [`MAX_TYPE_BIT_WIDTH`].
     pub fn insert_parameter(
         &mut self,
         name: TemplateProgramWitness,
@@ -1400,8 +1446,8 @@ impl Scope {
                 found: ty,
             }),
             Entry::Vacant(entry) => {
-                entry.insert(ty);
-                Ok(())
+                entry.insert(ty.clone());
+                self.add_value_bit_width(&ty)
             }
         }
     }
@@ -1412,6 +1458,7 @@ impl Scope {
     ///
     /// * [`Error::WitnessOutsideMain`] The current scope is not inside the main function.
     /// * [`Error::WitnessReused`] A witness with the same name has already been defined.
+    /// * [`Error::ValuesTooLarge`] The parameters and witnesses together exceed [`MAX_TYPE_BIT_WIDTH`].
     pub fn insert_witness(
         &mut self,
         name: TemplateProgramWitness,
@@ -1424,10 +1471,26 @@ impl Scope {
         match self.witnesses.entry(name.clone()) {
             Entry::Occupied(_) => Err(Error::WitnessReused { name }),
             Entry::Vacant(entry) => {
-                entry.insert(ty);
-                Ok(())
+                entry.insert(ty.clone());
+                self.add_value_bit_width(&ty)
             }
         }
+    }
+
+    // Building each value allocates its full bit width, so many values that are
+    // each within the limit could still exhaust memory together.
+    // Only the value that crosses the limit is an error, the ones after it are not reported.
+    fn add_value_bit_width(&mut self, ty: &ResolvedType) -> Result<(), Error> {
+        let previous = self.values_bit_width;
+        self.values_bit_width = previous.saturating_add(bit_width(ty));
+
+        if previous <= MAX_TYPE_BIT_WIDTH && MAX_TYPE_BIT_WIDTH < self.values_bit_width {
+            return Err(Error::ValuesTooLarge {
+                bit_width: self.values_bit_width,
+            });
+        }
+
+        Ok(())
     }
 
     /// Consume the scope and build the analyzed program with the given `main` body.
@@ -2516,6 +2579,7 @@ impl AbstractSyntaxTree for Call {
                 //   fn f(element: E, accumulator: A) -> A
                 let element_ty = function.params().first().expect("foldable function").ty();
                 let list_ty = ResolvedType::list(element_ty.clone(), bound);
+                check_type_size(&list_ty).with_span(from)?;
                 let accumulator_ty = function
                     .params()
                     .get(1)
@@ -2537,6 +2601,7 @@ impl AbstractSyntaxTree for Call {
                 //   fn f(element: E, accumulator: A) -> A
                 let element_ty = function.params().first().expect("foldable function").ty();
                 let array_ty = ResolvedType::array(element_ty.clone(), size.get());
+                check_type_size(&array_ty).with_span(from)?;
                 let accumulator_ty = function
                     .params()
                     .get(1)

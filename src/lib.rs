@@ -1612,6 +1612,92 @@ fn main() {
     }
 
     #[test]
+    fn oversized_types_are_rejected() {
+        let cases = [
+            (
+                "fn main() { let a: [u8; 1000000000000] = witness::A; }",
+                "Array size 1000000000000 exceeds",
+            ),
+            (
+                "fn main() { let a: List<u8, 4611686018427387904> = witness::A; }",
+                "List bound 4611686018427387904 exceeds",
+            ),
+            (
+                "fn main() { let a: [(); 4294967296] = witness::A; }",
+                "Array size 4294967296 exceeds",
+            ),
+            (
+                "fn main() { let a: [u8; 1073741824] = witness::A; }",
+                "is 8589934592 bits wide",
+            ),
+            (
+                "type A = [u8; 1073741824]; fn main() { let a: A = witness::A; }",
+                "is 8589934592 bits wide",
+            ),
+            (
+                "enum E { A([u8; 1073741824]) } fn main() { let e: E = witness::E; }",
+                "is 8589934592 bits wide",
+            ),
+            (
+                "fn main() { let a: [u8; 4] = witness::A; let b: [u32; 268435456] = <[u8; 4]>::into(a); }",
+                "is 8589934592 bits wide",
+            ),
+            (
+                "fn f(x: u8, acc: u8) -> u8 { acc }
+                 fn main() { let r: u8 = array_fold::<f, 1000000000000>(witness::A, 0); }",
+                "Array size 1000000000000 exceeds",
+            ),
+            (
+                "fn f(x: u8, acc: u8) -> u8 { acc }
+                 fn main() { let r: u8 = fold::<f, 4294967296>(witness::A, 0); }",
+                "List bound 4294967296 exceeds",
+            ),
+            (
+                "fn main() { let a: [u8; 99999999999999999999999] = witness::A; }",
+                "Invalid array size",
+            ),
+            (
+                "fn main() {
+                    let a: [u8; 268435455] = witness::A;
+                    let b: [u8; 268435455] = witness::B;
+                }",
+                "are 4294967280 bits wide in total",
+            ),
+            (
+                "fn main() {
+                    let a: [u8; 268435455] = witness::A;
+                    let b: [u8; 268435455] = param::B;
+                }",
+                "are 4294967280 bits wide in total",
+            ),
+        ];
+
+        for (src, expected) in cases {
+            let err = TemplateAst::new_with_unstable(
+                src,
+                &UnstableFeatures::all(),
+                Box::new(crate::ast::ElementsJetHinter::new()),
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains(expected), "Expected '{expected}', got: {err}");
+        }
+    }
+
+    #[test]
+    fn largest_types_compile() {
+        // 268435452 * 8 + 0 + 30 = 2^31 - 2 bits in total
+        let src = "fn main() {
+                let a: [u8; 268435452] = witness::A;
+                let b: [(); 2147483647] = witness::B;
+                let c: List<(), 1073741824> = witness::C;
+            }";
+
+        TestCase::program_text(Cow::Borrowed(src));
+    }
+
+    #[test]
     fn enum_construction_compiles_and_runs() {
         let src = "enum Action { Refresh(u32, bool), Cold, }
              fn pick() -> Action {

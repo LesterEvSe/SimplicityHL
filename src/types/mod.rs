@@ -12,6 +12,11 @@ pub use self::inner::{EnumInfo, EnumVariantInfo, TypeInner, UIntType};
 pub use self::resolved::ResolvedType;
 pub use self::structural::StructuralType;
 
+/// Maximum bit width of a type, and maximum array size and list bound.
+///
+/// Equals `MAX_CELLS` in rust-simplicity's `bit_machine/limits.rs`, which is private.
+pub const MAX_TYPE_BIT_WIDTH: usize = (1 << 31) - 1;
+
 macro_rules! construct_int {
     ($name: ident, $ty: ident, $text: expr) => {
         #[doc = "Create the type of"]

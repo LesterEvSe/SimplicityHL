@@ -1988,13 +1988,21 @@ impl ChumskyParse for AliasedType {
             let array = delimited_with_recovery(
                 ty.clone()
                     .then_ignore(parse_token_with_recovery(Token::Semi))
-                    .then(num.clone())
-                    .map(|(ty, size)| {
+                    .then(num.clone().validate(|num, e, emit| -> usize {
                         let digits =
-                            crate::str::underscore_parsing::strip_digit_separators(size.as_inner());
+                            crate::str::underscore_parsing::strip_digit_separators(num.as_inner());
 
-                        AliasedType::array(ty, usize::from_str(digits.as_ref()).unwrap_or_default())
-                    }),
+                        usize::from_str(digits.as_ref()).unwrap_or_else(|_| {
+                            emit.emit(
+                                Error::CannotParse {
+                                    msg: format!("Invalid array size: {num}"),
+                                }
+                                .with_span(e.span()),
+                            );
+                            0
+                        })
+                    }))
+                    .map(|(ty, size)| AliasedType::array(ty, size)),
                 Token::LBracket,
                 Token::RBracket,
                 |_| {

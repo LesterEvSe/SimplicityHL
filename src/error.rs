@@ -22,7 +22,7 @@ use crate::driver::{SourceMap, CRATE_STR, MAIN_MODULE};
 use crate::lexer::Token;
 use crate::parse::MatchPattern;
 use crate::str::{AliasName, FunctionName, Identifier, JetName, ModuleName};
-use crate::types::{ResolvedType, UIntType};
+use crate::types::{ResolvedType, UIntType, MAX_TYPE_BIT_WIDTH};
 use crate::unstable::UnstableFeature;
 use crate::TemplateProgramWitness;
 
@@ -827,6 +827,19 @@ pub enum Error {
     ListBoundPow2 {
         bound: usize,
     },
+    ArraySizeTooLarge {
+        size: usize,
+    },
+    ListBoundTooLarge {
+        bound: usize,
+    },
+    TypeTooLarge {
+        ty: ResolvedType,
+        bit_width: usize,
+    },
+    ValuesTooLarge {
+        bit_width: usize,
+    },
     BitStringPow2 {
         len: usize,
     },
@@ -1035,6 +1048,22 @@ impl fmt::Display for Error {
             Error::ListBoundPow2 { bound } => write!(
                 f,
                 "Expected a power of two greater than one (2, 4, 8, 16, 32, ...) as list bound, found {bound}"
+            ),
+            Error::ArraySizeTooLarge { size } => write!(
+                f,
+                "Array size {size} exceeds the maximum of {MAX_TYPE_BIT_WIDTH}"
+            ),
+            Error::ListBoundTooLarge { bound } => write!(
+                f,
+                "List bound {bound} exceeds the maximum of {MAX_TYPE_BIT_WIDTH}"
+            ),
+            Error::TypeTooLarge { ty, bit_width } => write!(
+                f,
+                "Type `{ty}` is {bit_width} bits wide, exceeding the maximum of {MAX_TYPE_BIT_WIDTH} bits"
+            ),
+            Error::ValuesTooLarge { bit_width } => write!(
+                f,
+                "Parameters and witnesses are {bit_width} bits wide in total, exceeding the maximum of {MAX_TYPE_BIT_WIDTH} bits"
             ),
             Error::BitStringPow2 { len } => write!(
                 f,

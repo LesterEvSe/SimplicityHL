@@ -64,7 +64,7 @@ items.
 | DIAG-1 | Structured error types                | One error type per phase; no `String` errors in the public API      | —             | Proposed     |  —  |
 | DIAG-2 | Continue after any failed item        | A broken `use` or other item no longer stops the analysis           | —             | Proposed     | #451|
 | DIAG-3 | Identifier spans                      | Diagnostics point at the name, not at the whole item                | —             | Proposed     |  -  |
-| DIAG-4 | Analyze code with syntax errors       | Parser error nodes; files with syntax errors are analyzed           | DIAG-2        | Needs design |  -  |
+| DIAG-4 | Analyze code with syntax errors       | Parser error nodes; files with syntax errors are analyzed           | DIAG-2        | Proposed     |  -  |
 | DIAG-5 | Cost report                           | `--cost`: cost in mWU, size in bytes, Bit Machine memory            | —             | Needs design |  -  |
 | OPT    | [Optimizations](OPT.md)               | Compiler optimizations                                              | —             | -            |  -  |
 | OPT-1  | "Post-hoc optimizer"                  | Optimizer that takes an object file, improves code, outputs proofs  | IR-3          | -            |  -  |

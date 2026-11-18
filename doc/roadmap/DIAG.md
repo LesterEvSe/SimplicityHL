@@ -7,7 +7,7 @@ Better error messages, continuing after initial errors, etc.
 | DIAG-1 | Structured error types          | @LesterEvSe | Proposed     |
 | DIAG-2 | Continue after any failed item  | @LesterEvSe | Proposed     |
 | DIAG-3 | Identifier spans                | @LesterEvSe | Proposed     |
-| DIAG-4 | Analyze code with syntax errors | @LesterEvSe | Needs design |
+| DIAG-4 | Analyze code with syntax errors | @LesterEvSe | Proposed     |
 | DIAG-5 | Cost report                     | @LesterEvSe | Needs design |
 
 ## Goal
@@ -273,3 +273,59 @@ Redefinitions, `MainCannotBePublic` and `MainNoInputs` point at the name.
 - Jet definitions, as follow-up work in the LSP.
 Jets have no source file: their signatures are built in `src/jet` and implemented in C in libsimplicity.
 With the span of the jet name at the call, the LSP can show its docs on hover, or open a generated read-only file with all jet signatures, docs and costs, as `codegen` already does for Rust.
+
+## DIAG-4: Analyze code with syntax errors
+
+Parser error nodes. Files with syntax errors are analyzed.
+
+### Design
+
+#### Today
+
+The parser recovers from syntax errors and reports several of them per file (#185), but analysis never sees the
+recovered tree.
+`parse_from_str_with_errors` returns no tree for a file with any error (see the TODO in `src/parse/pipeline.rs`), and
+the driver builds no program if any file had an error (`if diagnostics.has_errors()` in `src/driver/mod.rs`).
+So one syntax error hides every other error:
+
+```rust
+fn double(a: u32) -> u32 {
+    let b: u32 = a // reported: Expected `;` after statement
+    b
+}
+
+fn main() {
+    let c: bool = double(1); // never reported
+}
+```
+
+The LSP gets no tree for a file with a syntax error, so go-to-definition, document symbols and semantic tokens stop
+working in it.
+While the user types, the file almost always has one.
+
+Instead of made-up values, the parser should leave error nodes where it recovered, analysis gives them the type `!` without reporting.
+So we suggest this kind of structure to analyze files with syntax errors:
+
+| The parser can't read       | Today                         | Proposed                                         |
+|-----------------------------|-------------------------------|--------------------------------------------------|
+| An item                     | `Item::Ignored`               | the item, if its name was read, with error nodes |
+| A function body or a block  | an empty block, `()`          | an error expression                              |
+| A parameter list            | an empty list                 | error parameters                                 |
+| A `match`                   | a match with placeholder arms | an error expression                              |
+| A module body               | a module without items        | a broken mark, with silent paths into it         |
+| Generic arguments of a type | an alias named `error`        | an error type                                    |
+| A tuple type                | `()`                          | an error type                                    |
+| A length in a type          | `0`, as in `[u8; 0]`          | an error type                                    |
+
+#### Steps
+
+Steps 1 to 3 don't depend on each other and can land in any order.
+Step 4 comes last.
+
+1. Error expressions, error types and error parameters, in place of the empty block, the placeholder `match`, the empty parameter list, the `error` alias, `()` and `0`. Analysis types them `!` without reporting.
+2. The broken mark on modules, with silent paths into them.
+A `use` into a broken module binds its names silently, as a failed `use` does in DIAG-2.
+3. Items keep their name once it's read, and the broken parts get error nodes.
+4. `parse_from_str_with_errors` returns the tree with its errors, and the driver analyzes all files. Needs DIAG-2, since broken items must not stop the analysis.
+
+A file with a bad `simc` directive is not analyzed at all, because errors under another version can be incorrect.

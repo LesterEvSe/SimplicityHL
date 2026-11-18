@@ -6,7 +6,7 @@ Better error messages, continuing after initial errors, etc.
 |--------|---------------------------------|-------------|--------------|
 | DIAG-1 | Structured error types          | @LesterEvSe | Proposed     |
 | DIAG-2 | Continue after any failed item  | @LesterEvSe | Proposed     |
-| DIAG-3 | Identifier spans                | @LesterEvSe | Needs design |
+| DIAG-3 | Identifier spans                | @LesterEvSe | Proposed     |
 | DIAG-4 | Analyze code with syntax errors | @LesterEvSe | Needs design |
 | DIAG-5 | Cost report                     | @LesterEvSe | Needs design |
 
@@ -166,3 +166,110 @@ Propose fixes:
 | public, name already taken | `RedefinedItem`, unless another namespace imports | `RedefinedItem`                  |
 | private only               | `PrivateItem` without the item kind               | `PrivateItem` with the item kind |
 | not found                  | `UnresolvedItem` without the module               | `UnresolvedItem` with the module |
+
+## DIAG-3: Identifier spans
+
+Diagnostics point at the name, not at the whole item.
+
+### Design
+
+#### Today
+
+The parser reads names into the string types of `src/str.rs` and drops their spans.
+Only the node around a name has a span, so an error about the name points at the whole node:
+
+```rust
+fn add(a: u32, b: u32) -> u32 {
+    a
+}
+
+fn add(a: u32, b: u32) -> u32 {
+    b
+}
+```
+
+```text
+Error: Function `add` was defined multiple times
+   ╭─[main.simf:5:1]
+   │
+   ┆
+───╯
+```
+
+The label covers all of lines 5 to 7.
+`simc` prints no source line for it, and the editor underlines the whole function.
+An undefined type in a signature, such as `fn total(a: u64) -> Amount`, is reported the same way.
+
+The LSP needs these spans too (#178), because it currently finds them by lexing the source again: see
+`find_function_name_range`, `find_imported_function` and `get_call_span` in [simplicityhl-lsp#c48b265](https://github.com/BlockstreamResearch/simplicityhl-lsp/blob/c48b265e342358e2da5dfcc07c3259f5addff9d7/src/navigation/mod.rs).
+
+#### Proposed spans
+
+We propose to store a span next to each name in the parse tree, and on every node of a type:
+
+| Parse node                     | Span today                  | Proposed                                       |
+|--------------------------------|-----------------------------|------------------------------------------------|
+| `Function`                     | the whole function          | also the name                                  |
+| `FunctionParam`                | `a: u8`                     | also the name                                  |
+| `TypeAlias`, `EnumDeclaration` | the whole item              | also the name                                  |
+| `EnumVariant`                  | the whole variant           | also the name                                  |
+| `Module`                       | the whole module            | also the name                                  |
+| `UseDecl`                      | the whole `use`             | each path segment, imported name and `as` name |
+| `Call`                         | the call with its arguments | the callee, and `f` in `fold::<f, N>`          |
+| `EnumMatchArm`                 | the whole arm               | also the variant name                          |
+| `EnumConstruction`             | the whole expression        | also the variant name                          |
+| `AliasedType`                  | none                        | every node, e.g. `Amount` in `(u8, Amount)`    |
+
+Literals and variables in expressions already have a span, since the expression is the literal or the variable.
+
+The spans must live in the parse nodes, not inside the `src/str.rs` types.
+Parse nodes already leave spans out of equality and hashing (`impl_eq_hash!`), so nothing changes in how nodes compare.
+
+Types are different. `AliasedType` is the type as written: analysis turns it into `ResolvedType`.
+So every node of `AliasedType` gets its own span, which equality and hashing ignore.
+An undefined alias inside a larger type, such as `Amount` in `(u8, Amount)`, then points at `Amount` only, as in Rust.
+Types built in code, like jet signatures in `src/jet` and types read from `.wit` files, have no span.
+
+A name in the parse tree is wrapped together with its span, so its span is read like that of any other parse node:
+`function.name().span()`, and the same for each item of a `use` list.
+
+The type spans also let the LSP show what a type is on hover, like what `Pubkey` stands for or what `u8` is.
+
+#### What each error points at
+
+| Error                           | Label today                                | Label with DIAG-3              |
+|---------------------------------|--------------------------------------------|--------------------------------|
+| `FunctionRedefined`             | the whole second function                  | the second name                |
+| `RedefinedAlias`                | the whole second alias                     | the second name                |
+| `ParameterRedefined`            | the whole second parameter                 | the second name                |
+| `ModuleRedefined`               | the whole first module                     | the second name, as in MOD-1   |
+| `UnresolvedItem`, `PrivateItem` | the whole `use`                            | the item in the `use` list     |
+| `RedefinedItem`                 | the whole `use`                            | the item in the `use` list     |
+| `UndefinedAlias`                | the enclosing function, `let`, alias, call | the undefined name             |
+| `FunctionUndefined`             | the call with its arguments                | the function name              |
+| `MainCannotBePublic`            | the whole `main`                           | the name `main`                |
+| `MainNoInputs`                  | the whole `main`                           | the parameters                 |
+| `MainNoOutput`                  | the whole `main`                           | the return type                |
+
+Errors about a variable or a witness in an expression already point at the name, since the expression is just the name.
+
+#### Steps
+
+- Names of items and parameters.
+Redefinitions, `MainCannotBePublic` and `MainNoInputs` point at the name.
+  The LSP can drop `find_function_name_range`.
+- Types. `UndefinedAlias` points at the undefined name and `MainNoOutput` at the return type, so no error covers a whole function any more.
+  The LSP can show hover information for types.
+- `use` paths and items. `use` errors point at the item. (Also influenced by MOD-1)
+  The LSP can drop `find_imported_function`.
+- Call names. `FunctionUndefined` points at the name.
+  The LSP can drop `get_call_span` and the lexing in semantic tokens.
+
+### Out of scope
+
+- Pointing a redefinition also at the first definition, as a secondary label (`Diagnostic::with_secondary`).
+- Variables in patterns, such as `a` in `let (a, b) = ...`.
+- The rest of what the LSP asks for in #191. Currently the LSP has its own resolver, and parses a file without `main` by appending `fn main() {}` to it. It should be a separate roadmap item.
+- Jet definitions, as follow-up work in the LSP.
+Jets have no source file: their signatures are built in `src/jet` and implemented in C in libsimplicity.
+With the span of the jet name at the call, the LSP can show its docs on hover, or open a generated read-only file with all jet signatures, docs and costs, as `codegen` already does for Rust.
